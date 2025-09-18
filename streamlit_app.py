@@ -97,13 +97,15 @@ class HarmonicSequencer:
                 ib = base_keys.index(b)
             except ValueError:
                 # if minor input, convert to relative major
+                ia = None
+                ib = None
                 for maj, minr in self.relative_minors.items():
                     if minr == a:
                         ia = base_keys.index(maj)
                     if minr == b:
                         ib = base_keys.index(maj)
-                # if still not found, fallback
-                if a not in base_keys and b not in base_keys:
+                # if still not found, fallback maximum distance
+                if ia is None or ib is None:
                     return 6
             d = abs(ia - ib)
             return min(d, 12 - d)
@@ -209,19 +211,25 @@ class HarmonicSequencer:
             return self.relative_minors.get(key)
         return key
 
-    def suggest_bridge_keys(self, key1: str, key2: str) -> List[str]:
+    def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None) -> List[str]:
         """
         Suggest keys that can bridge between key1 -> key2.
-        Returns a list of human-readable bridge suggestions (single keys or chains like 'C -> Am').
+        Returns a list of human-readable bridge suggestions (single keys or chains like 'C -> Am' or 'C -> G -> Em').
+        If available_keys is provided, prefer sequences that use those keys (useful if you want to mix *through* songs in the set).
         """
         key1 = self._normalize_key(key1)
         key2 = self._normalize_key(key2)
+        if available_keys:
+            available_keys = [self._normalize_key(k) for k in available_keys]
+        else:
+            available_keys = []
 
         # If already compatible enough, nothing needed
         direct_compat = self.compatibility_matrix.get((key1, key2), 0)
         if direct_compat > 0.65:
             return []
 
+        # Compose universe of candidate keys (majors + relative minors)
         all_keys = list(self.circle_of_fifths) + list(self.relative_minors.values())
 
         # Helper to get compatibility with safety default
@@ -269,43 +277,94 @@ class HarmonicSequencer:
         for k in candidates:
             score = compat(key1, k) + compat(k, key2)
             if score > 0:  # some usefulness
+                # small boost to keys that exist in available_keys (so we encourage mixing through set)
+                if k in available_keys:
+                    score += 0.15
                 single_suggestions.append((k, score))
         single_suggestions.sort(key=lambda x: x[1], reverse=True)
 
-        # Build two-step chain suggestions if single suggestions are weak or absent
-        chain_suggestions = []
-        # Try limited search: for each A reachable from key1, for each B reachable from A, check B -> key2
-        for a in all_keys:
-            a_norm = self._normalize_key(a)
-            if a_norm in (key1, key2):
-                continue
-            if compat(key1, a_norm) < 0.5:
-                continue
-            for b in all_keys:
-                b_norm = self._normalize_key(b)
-                if b_norm in (key1, key2, a_norm):
-                    continue
-                if compat(a_norm, b_norm) < 0.5:
-                    continue
-                if compat(b_norm, key2) < 0.5:
-                    continue
-                score = compat(key1, a_norm) + compat(a_norm, b_norm) + compat(b_norm, key2)
-                chain_suggestions.append(((a_norm, b_norm), score))
+        # --- Beam search for multi-hop chains (up to max_hops) ---
+        def find_chains(max_hops: int = 4, beam_width: int = 60, min_edge_compat: float = 0.45):
+            """
+            Beam-search style pathfinder that finds sequences from key1 to key2 (excluding key1 in formatted result).
+            Returns list of (path_list, score) where path_list includes intermediate keys and ends with key2.
+            """
+            beams = [([key1], 0.0)]
+            results = []
 
-        chain_suggestions.sort(key=lambda x: x[1], reverse=True)
+            for depth in range(1, max_hops + 1):
+                new_beams = []
+                for path, score in beams:
+                    last = path[-1]
+                    # consider neighbors from all_keys
+                    for k in all_keys:
+                        k_norm = self._normalize_key(k)
+                        if k_norm in path:
+                            continue
+                        edge_c = compat(last, k_norm)
+                        if edge_c < min_edge_compat:
+                            continue
+                        # boost nodes that are in available_keys
+                        node_boost = 0.12 if k_norm in available_keys else 0.0
+                        new_score = score + edge_c + node_boost
+                        new_path = path + [k_norm]
+                        if k_norm == key2:
+                            # record the full path (excluding starting key for display)
+                            results.append((new_path[1:], new_score))
+                        else:
+                            new_beams.append((new_path, new_score))
+                # prune and continue
+                beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_width]
+            # sort results best-first
+            results.sort(key=lambda x: x[1], reverse=True)
+            return results
 
-        # Format results: prefer best single-key options, then top chains
+        chain_results = find_chains(max_hops=4, beam_width=80, min_edge_compat=0.45)
+
+        # Format results: single suggestions first, then chain suggestions
         results: List[str] = []
-        # Add up to 4 single-key suggestions
+        # Add up to 4 top single-key suggestions
         for k, score in single_suggestions[:4]:
             if k not in (key1, key2) and k not in results:
                 results.append(k)
 
-        # Add up to 3 chain suggestions (format 'A -> B')
-        for (a, b), score in chain_suggestions[:3]:
-            formatted = f"{a} -> {b}"
+        # Add chain suggestions from the dedicated chain search
+        # Format chains like 'A -> B' or 'A -> B -> C'
+        for path, score in chain_results[:6]:
+            formatted = " -> ".join(path)
             if formatted not in results:
                 results.append(formatted)
+
+        # If still nothing, fall back to simple two-step try (keeps prior behavior)
+        if not results:
+            # build two-step chain suggestions (previous approach)
+            chain_suggestions = []
+            for a in all_keys:
+                a_norm = self._normalize_key(a)
+                if a_norm in (key1, key2):
+                    continue
+                if compat(key1, a_norm) < 0.5:
+                    continue
+                for b in all_keys:
+                    b_norm = self._normalize_key(b)
+                    if b_norm in (key1, key2, a_norm):
+                        continue
+                    if compat(a_norm, b_norm) < 0.5:
+                        continue
+                    if compat(b_norm, key2) < 0.5:
+                        continue
+                    score = compat(key1, a_norm) + compat(a_norm, b_norm) + compat(b_norm, key2)
+                    # small boosts for available_keys
+                    if a_norm in available_keys:
+                        score += 0.1
+                    if b_norm in available_keys:
+                        score += 0.1
+                    chain_suggestions.append(((a_norm, b_norm), score))
+            chain_suggestions.sort(key=lambda x: x[1], reverse=True)
+            for (a, b), score in chain_suggestions[:4]:
+                formatted = f"{a} -> {b}"
+                if formatted not in results:
+                    results.append(formatted)
 
         # Fallback: if nothing found, suggest stepping halfway around the circle (median key)
         if not results:
@@ -316,8 +375,8 @@ class HarmonicSequencer:
                 fallback = self.circle_of_fifths[half]
                 results.append(fallback)
 
-        # Limit output to 6 suggestions for UI clarity
-        return results[:6]
+        # Limit output to 8 suggestions for UI clarity
+        return results[:8]
     
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
         # Simple reordering to minimize harmonic jumps: greedy nearest neighbor
@@ -353,13 +412,17 @@ class HarmonicSequencer:
         sequence = self.create_harmonic_sequence(songs)
         mixing_pairs = self.find_mixing_pairs(songs)
         
+        # Prepare a list of keys that exist in the set so suggest_bridge_keys can prefer paths
+        existing_keys = [s.key for s in songs]
+        
         gaps_and_bridges = []
         for i in range(len(sequence) - 1):
             a = sequence[i]
             b = sequence[i + 1]
             score = self._distance_score(a.key, b.key)
             if score < 0.6:
-                suggestions = self.suggest_bridge_keys(a.key, b.key)
+                # pass the existing keys so the bridge suggestion can prefer using them
+                suggestions = self.suggest_bridge_keys(a.key, b.key, available_keys=existing_keys)
                 gaps_and_bridges.append({
                     'from': a,
                     'to': b,
@@ -393,7 +456,7 @@ def fetch_bpm_from_web(title: str, artist: str) -> Optional[int]:
 
 # ---- Streamlit UI ----
 st.title("Harmonic Song Analyzer 🎧")
-st.write("Upload a CSV or paste a list of songs to analyze harmonic flow and suggest bridge keys.")
+st.write("Upload a CSV or paste a list of songs to analyze harmonic flow and suggest bridge keys/sequences.")
 
 uploaded = st.file_uploader("Upload CSV of songs (title,artist,key,tempo?)", type=["csv"])
 text_input = st.text_area("Or paste CSV/text (title,artist,key,tempo)", height=120)
@@ -480,7 +543,7 @@ if songs:
             a = gb['from']
             b = gb['to']
             st.subheader(f"{a.title} ({a.key}) → {b.title} ({b.key}) — score {gb['score']:.2f}")
-            st.write("Bridge suggestions:")
+            st.write("Bridge suggestions (single keys, then multi-step sequences — sequences prefer keys already in your set):")
             for s in gb['suggestions']:
                 st.write(f"- {s}")
             st.write("---")
@@ -493,3 +556,4 @@ else:
 st.markdown("---")
 st.markdown("Built with ❤️ — Harmonic suggestions are heuristic-based to help DJs and playlist curators. "
             "Use your ears and musical judgement; these are suggestions, not rules.")
+
