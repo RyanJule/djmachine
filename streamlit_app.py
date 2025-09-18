@@ -53,21 +53,20 @@ class HarmonicSequencer:
         for major, minor in self.relative_minors.items():
             mappings[major] = major
             mappings[minor] = minor
-        
-        # Add common enharmonics
+
+        # Add common enharmonics (major forms)
         enharmonics = {
             'Gb': 'F#', 'Cb': 'B', 'E#': 'F', 'B#': 'C', 'A#': 'Bb', 'D#': 'Eb', 'G#': 'Ab',
             'Bb': 'Bb', 'Eb': 'Eb', 'Ab': 'Ab', 'Db': 'Db', 'Gb': 'F#',
             'F#': 'F#', 'C#': 'C#', 'D#': 'D#', 'G#': 'G#', 'A#': 'A#'
         }
-        
-        # Also map unicode flat/sharp and long forms
+
         enharmonics.update({
             'B♭': 'Bb', 'E♭': 'Eb', 'A♭': 'Ab', 'D♭': 'Db', 'G♭': 'Gb',
             'F♯': 'F#', 'C♯': 'C#', 'D♯': 'D#', 'G♯': 'G#', 'A♯': 'A#'
         })
-        
-        # accept X Major / X Minor textual forms
+
+        # accept X Major / X Minor textual forms for entries already present
         for k in list(mappings.keys()):
             mappings[k + " Major"] = mappings[k]
             if k.endswith('m'):
@@ -75,13 +74,45 @@ class HarmonicSequencer:
                 mappings[k[:-1] + "m"] = mappings[k]
             else:
                 mappings[k + " Minor"] = mappings.get(k, k) + "m"
-        
+
+        # Add enharmonic mappings and also add their minor variants (e.g. 'B♭m' -> 'Bbm')
+        for k, v in enharmonics.items():
+            mappings[k] = v
+            # add the minor form mapping as well (both unicode and ASCII variants)
+            try:
+                minor_val = v + 'm' if not v.endswith('m') else v
+                mappings[k + 'm'] = minor_val
+            except Exception:
+                pass
+
+        # Finally merge enharmonics into mappings
         mappings.update(enharmonics)
         return mappings
     
     def _normalize_key(self, key: str) -> str:
-        key = key.strip().replace(' Major', '').replace(' Minor', 'm')
-        return self.key_mappings.get(key, key)
+        if not key:
+            return ""
+        k = str(key).strip()
+        # Normalize unicode flats/sharps to ASCII
+        k = k.replace('♭', 'b').replace('♯', '#')
+        # Normalize textual variants and spacing
+        k = re.sub(r'\s+', ' ', k)
+        k = k.replace(' Major', '').replace(' major', '')
+        k = k.replace(' Minor', 'm').replace(' minor', 'm')
+        # Remove stray spaces around minor suffix
+        k = k.replace(' m', 'm').replace('m ', 'm')
+
+        # Standardize root letter capitalization (e.g., 'bbm' -> 'Bbm', 'eb' -> 'Eb')
+        m = re.match(r'^([A-Ga-g])([b#]?)(m?)$', k.strip())
+        if m:
+            root = m.group(1).upper()
+            acc = m.group(2) or ''
+            suf = m.group(3) or ''
+            candidate = f"{root}{acc}{suf}"
+            return self.key_mappings.get(candidate, candidate)
+
+        # final fallback: map via key_mappings if present, else return cleaned key
+        return self.key_mappings.get(k, k)
     
     def _build_compatibility_matrix(self) -> Dict[Tuple[str, str], float]:
         # Build a simple heuristic compatibility between keys based on circle distance
@@ -269,7 +300,7 @@ class HarmonicSequencer:
             k_norm = self._normalize_key(k)
             if k_norm == key1 or k_norm == key2:
                 continue
-            if compat(key1, k_norm) > 0.45 and compat(k_norm, key2) > 0.45:
+            if compat(key1, k_norm) > 0.35 and compat(k_norm, key2) > 0.35:
                 candidates.add(k_norm)
 
         # Score single-key candidates by combined compatibility
@@ -284,7 +315,7 @@ class HarmonicSequencer:
         single_suggestions.sort(key=lambda x: x[1], reverse=True)
 
         # --- Beam search for multi-hop chains (up to max_hops) ---
-        def find_chains(max_hops: int = 4, beam_width: int = 60, min_edge_compat: float = 0.45):
+        def find_chains(max_hops: int = 4, beam_width: int = 60, min_edge_compat: float = 0.35):
             """
             Beam-search style pathfinder that finds sequences from key1 to key2 (excluding key1 in formatted result).
             Returns list of (path_list, score) where path_list includes intermediate keys and ends with key2.
@@ -319,7 +350,7 @@ class HarmonicSequencer:
             results.sort(key=lambda x: x[1], reverse=True)
             return results
 
-        chain_results = find_chains(max_hops=4, beam_width=80, min_edge_compat=0.45)
+        chain_results = find_chains(max_hops=4, beam_width=80, min_edge_compat=0.35)
 
         # Format results: single suggestions first, then chain suggestions
         results: List[str] = []
@@ -343,15 +374,15 @@ class HarmonicSequencer:
                 a_norm = self._normalize_key(a)
                 if a_norm in (key1, key2):
                     continue
-                if compat(key1, a_norm) < 0.5:
+                if compat(key1, a_norm) < 0.4:
                     continue
                 for b in all_keys:
                     b_norm = self._normalize_key(b)
                     if b_norm in (key1, key2, a_norm):
                         continue
-                    if compat(a_norm, b_norm) < 0.5:
+                    if compat(a_norm, b_norm) < 0.4:
                         continue
-                    if compat(b_norm, key2) < 0.5:
+                    if compat(b_norm, key2) < 0.4:
                         continue
                     score = compat(key1, a_norm) + compat(a_norm, b_norm) + compat(b_norm, key2)
                     # small boosts for available_keys
@@ -556,4 +587,3 @@ else:
 st.markdown("---")
 st.markdown("Built with ❤️ — Harmonic suggestions are heuristic-based to help DJs and playlist curators. "
             "Use your ears and musical judgement; these are suggestions, not rules.")
-
