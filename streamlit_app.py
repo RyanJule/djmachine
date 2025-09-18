@@ -90,29 +90,61 @@ class HarmonicSequencer:
         return mappings
     
     def _normalize_key(self, key: str) -> str:
+        """
+        Normalize incoming key strings to the canonical internal form used across the app.
+        - normalizes unicode ♭/♯ to b/#, trims spacing and textual "Major"/"Minor"
+        - canonicalizes casing (e.g. 'bbm' -> 'Bbm')
+        - maps common *flat-minor* spellings to their enharmonic *sharp-minor* equivalents
+          if those equivalents are present in the key mappings / compatibility universe.
+        """
         if not key:
             return ""
+
         k = str(key).strip()
-        # Normalize unicode flats/sharps to ASCII
+        # normalize unicode accidentals
         k = k.replace('♭', 'b').replace('♯', '#')
-        # Normalize textual variants and spacing
+        # normalize spacing and textual forms
         k = re.sub(r'\s+', ' ', k)
         k = k.replace(' Major', '').replace(' major', '')
         k = k.replace(' Minor', 'm').replace(' minor', 'm')
-        # Remove stray spaces around minor suffix
         k = k.replace(' m', 'm').replace('m ', 'm')
 
-        # Standardize root letter capitalization (e.g., 'bbm' -> 'Bbm', 'eb' -> 'Eb')
+        # Basic canonicalization: root letter upper, accidental as-is, optional 'm'
         m = re.match(r'^([A-Ga-g])([b#]?)(m?)$', k.strip())
         if m:
             root = m.group(1).upper()
             acc = m.group(2) or ''
             suf = m.group(3) or ''
             candidate = f"{root}{acc}{suf}"
+            # if mapping exists, return mapped canonical form
+            if candidate in self.key_mappings:
+                return self.key_mappings[candidate]
+
+            # If minor with a flat accidental (e.g. 'Dbm'), try enharmonic sharp mapping:
+            if suf == 'm' and acc == 'b':
+                flat_root = f"{root}b"
+                # common flat -> sharp enharmonic map (covers the useful set)
+                flat_to_sharp = {
+                    'Db': 'C#', 'Eb': 'D#', 'Ab': 'G#',
+                    'Bb': 'A#', 'Gb': 'F#', 'Cb': 'B'
+                }
+                sharp_root = flat_to_sharp.get(flat_root)
+                if sharp_root:
+                    enh_minor = sharp_root + 'm'
+                    # prefer the enharmonic minor if it's in key_mappings or the relative minors list
+                    if enh_minor in self.key_mappings or enh_minor in self.relative_minors.values():
+                        return self.key_mappings.get(enh_minor, enh_minor)
+
+            # otherwise return candidate (or its mapping)
             return self.key_mappings.get(candidate, candidate)
 
-        # final fallback: map via key_mappings if present, else return cleaned key
-        return self.key_mappings.get(k, k)
+        # fallback: try direct dictionary lookup for anything unusual
+        k_clean = k.strip()
+        if k_clean in self.key_mappings:
+            return self.key_mappings[k_clean]
+
+        # final fallback: return cleaned key as-is
+        return k_clean
     
     def _build_compatibility_matrix(self) -> Dict[Tuple[str, str], float]:
         # Build a simple heuristic compatibility between keys based on circle distance
