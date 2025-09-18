@@ -202,8 +202,8 @@ class HarmonicSequencer:
         for i, song1 in enumerate(songs):
             for song2 in songs[i+1:]:
                 key_compat = self.compatibility_matrix.get((song1.key, song2.key), 0.3)
-                bmp_compat = self._bmp_compatibility(song1.bpm, song2.bpm)
-                total_compat = key_compat * 0.6 + bmp_compat * 0.4
+                bpm_compat = self._bpm_compatibility(song1.bpm, song2.bpm)
+                total_compat = key_compat * 0.6 + bpm_compat * 0.4
                 
                 if total_compat >= min_compatibility:
                     pairs.append((song1, song2, total_compat))
