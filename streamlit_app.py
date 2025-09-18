@@ -579,8 +579,6 @@ def main():
         avg_bpm = sum(bpms) / len(bpms)
         col3.metric("Average BPM", f"{avg_bpm:.0f}")
         
-        bmp_range = max(bpms) - min(bpms)
-        col4.metric("BPM Range", f"{bpm_range}")
         
         # Run harmonic analysis
         with st.spinner("Analyzing harmonic relationships..."):
