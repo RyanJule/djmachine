@@ -168,7 +168,7 @@ class HarmonicSequencer:
             for song in remaining:
                 compatibility = self.compatibility_matrix.get((current_key, song.key), 0.3)
                 bpm_compat = self._bpm_compatibility(sequence[-1].bpm, song.bpm)
-                total_score = compatibility * 0.7 + bmp_compat * 0.3
+                total_score = compatibility * 0.7 + bpm_compat * 0.3
                 
                 if total_score > best_score:
                     best_score = total_score
@@ -355,7 +355,7 @@ class SongDataScraper:
                 name=song_name,
                 artist=artist,
                 key=key,
-                bpm=bmp
+                bpm=bpm
             )
             
         except Exception:
@@ -375,11 +375,11 @@ class SongDataScraper:
         return key.strip()
     
     def _clean_bpm(self, bpm_value) -> int:
-        if not bmp_value:
+        if not bpm_value:
             return 0
         
-        if isinstance(bmp_value, str):
-            bmp_match = re.search(r'(\d+(?:\.\d+)?)', str(bmp_value))
+        if isinstance(bpm_value, str):
+            bpm_match = re.search(r'(\d+(?:\.\d+)?)', str(bpm_value))
             if bpm_match:
                 bpm_value = float(bpm_match.group(1))
             else:
