@@ -1,3 +1,4 @@
+# streamlit_app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,13 +8,11 @@ import time
 import re
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
-import plotly.express as px
-import plotly.graph_objects as go
 from io import StringIO
 
 # Set page config
 st.set_page_config(
-    page_title="Harmonic Song Analyzer",
+    page_title="Harmonic Song Analyzer — Camelot",
     page_icon="🎵",
 )
 
@@ -26,423 +25,342 @@ class Song:
     tempo: Optional[int] = None
     mood: Optional[str] = None
     notes: Optional[str] = None
+    camelot: Optional[str] = None  # filled in after normalization
 
-# ---- Harmonic Sequencer ----
+# ---- Harmonic Sequencer (Camelot-based) ----
 class HarmonicSequencer:
     def __init__(self):
-        # Circle of Fifths for major keys
-        self.circle_of_fifths = [
-            'C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F'
-        ]
-        
-        # Relative minor keys
-        self.relative_minors = {
-            'C': 'Am', 'G': 'Em', 'D': 'Bm', 'A': 'F#m', 'E': 'C#m', 'B': 'G#m',
-            'F#': 'D#m', 'Db': 'Bbm', 'Ab': 'Fm', 'Eb': 'Cm', 'Bb': 'Gm', 'F': 'Dm'
-        }
-        
-        # Extended key mappings including minors and alternative notations
-        self.key_mappings = self._build_key_mappings()
-        
-        # Compatibility matrix (major/minor compatibilities, symmetric-ish)
-        self.compatibility_matrix = self._build_compatibility_matrix()
-    
-    def _build_key_mappings(self) -> Dict[str, str]:
-        mappings = {}
-        # map natural major and minors
-        for major, minor in self.relative_minors.items():
-            mappings[major] = major
-            mappings[minor] = minor
-
-        # Add common enharmonics (major forms)
-        enharmonics = {
-            'Gb': 'F#', 'Cb': 'B', 'E#': 'F', 'B#': 'C', 'A#': 'Bb', 'D#': 'Eb', 'G#': 'Ab',
-            'Bb': 'Bb', 'Eb': 'Eb', 'Ab': 'Ab', 'Db': 'Db', 'Gb': 'F#',
-            'F#': 'F#', 'C#': 'C#', 'D#': 'D#', 'G#': 'G#', 'A#': 'A#'
+        # Canonical display name for each Camelot code (one canonical key per encoding)
+        # We choose familiar spellings for display: majors use common names, minors use the usual minor names.
+        self.camelot_to_key = {
+            '1A': 'G#m',   '1B': 'B',
+            '2A': 'D#m',   '2B': 'F#',
+            '3A': 'Bbm',   '3B': 'Db',
+            '4A': 'Fm',    '4B': 'Ab',
+            '5A': 'Cm',    '5B': 'Eb',
+            '6A': 'Gm',    '6B': 'Bb',
+            '7A': 'Dm',    '7B': 'F',
+            '8A': 'Am',    '8B': 'C',
+            '9A': 'Em',    '9B': 'G',
+            '10A': 'Bm',   '10B': 'D',
+            '11A': 'F#m',  '11B': 'A',
+            '12A': 'C#m',  '12B': 'E'
         }
 
-        enharmonics.update({
-            'B♭': 'Bb', 'E♭': 'Eb', 'A♭': 'Ab', 'D♭': 'Db', 'G♭': 'Gb',
-            'F♯': 'F#', 'C♯': 'C#', 'D♯': 'D#', 'G♯': 'G#', 'A♯': 'A#'
-        })
+        # Build alias map: many possible textual spellings -> one canonical Camelot code.
+        # This ensures "all keys are mapped to just one possible encoding".
+        self.alias_to_camelot: Dict[str, str] = self._build_alias_map()
 
-        # accept X Major / X Minor textual forms for entries already present
-        for k in list(mappings.keys()):
-            mappings[k + " Major"] = mappings[k]
-            if k.endswith('m'):
-                mappings[k[:-1] + " Minor"] = mappings[k]
-                mappings[k[:-1] + "m"] = mappings[k]
-            else:
-                mappings[k + " Minor"] = mappings.get(k, k) + "m"
+        # Precompute numeric neighbors for Camelot codes (1..12)
+        # no need for a separate compatibility matrix; we'll compute on the fly using rules
+        self.camelot_codes = list(self.camelot_to_key.keys())
 
-        # Add enharmonic mappings and also add their minor variants (e.g. 'B♭m' -> 'Bbm')
-        for k, v in enharmonics.items():
-            mappings[k] = v
-            # add the minor form mapping as well (both unicode and ASCII variants)
-            try:
-                minor_val = v + 'm' if not v.endswith('m') else v
-                mappings[k + 'm'] = minor_val
-            except Exception:
-                pass
+    def _build_alias_map(self) -> Dict[str, str]:
+        # Normalize function for alias keys (lowercase, normalize unicode accidentals, strip)
+        def clean(k: str) -> str:
+            if not k:
+                return ""
+            s = str(k).strip()
+            s = s.replace('♭', 'b').replace('♯', '#')
+            s = s.replace(' Major', '').replace(' major', '')
+            s = s.replace(' Minor', 'm').replace(' minor', 'm')
+            s = re.sub(r'\s+', '', s)
+            s = s.replace('mM', 'm')
+            return s.lower()
 
-        # Finally merge enharmonics into mappings
-        mappings.update(enharmonics)
-        return mappings
-    
-    def _normalize_key(self, key: str) -> str:
-        """
-        Normalize incoming key strings to the canonical internal form used across the app.
-        - normalizes unicode ♭/♯ to b/#, trims spacing and textual "Major"/"Minor"
-        - canonicalizes casing (e.g. 'bbm' -> 'Bbm')
-        - maps common *flat-minor* spellings to their enharmonic *sharp-minor* equivalents
-          if those equivalents are present in the key mappings / compatibility universe.
-        """
+        # Manual mapping: map common spellings (majors and minors, flats/sharps/variants) to Camelot codes.
+        # This is intentionally explicit so a wide variety of user inputs map deterministically to one encoding.
+        m = {}
+        # Helper to add multiple aliases
+        def add_aliases(aliases: List[str], code: str):
+            for a in aliases:
+                m[clean(a)] = code
+
+        # 1B = B major ; 1A = G# minor (Ab minor enharmonic)
+        add_aliases(['B', 'B major', 'Cb'], '1B')
+        add_aliases(['G#m', 'Abm', 'G# minor', 'Ab minor', 'G#m'], '1A')
+
+        # 2B = F# major ; 2A = D# minor (Eb minor enharmonic)
+        add_aliases(['F#', 'F# major', 'Gb'], '2B')
+        add_aliases(['D#m', 'Ebm', 'D# minor', 'Eb minor', 'D#m'], '2A')
+
+        # 3B = Db major ; 3A = Bbm
+        add_aliases(['Db', 'Db major', 'C#', 'C# major'], '3B')
+        add_aliases(['Bbm', 'A#m', 'Bbminor', 'A# minor', 'Bb m', 'A#m'], '3A')
+
+        # 4B = Ab major ; 4A = Fm
+        add_aliases(['Ab', 'Ab major', 'G#', 'G# major'], '4B')
+        add_aliases(['Fm', 'F minor'], '4A')
+
+        # 5B = Eb major ; 5A = Cm
+        add_aliases(['Eb', 'Eb major', 'D#', 'D# major'], '5B')
+        add_aliases(['Cm', 'C minor'], '5A')
+
+        # 6B = Bb major ; 6A = Gm
+        add_aliases(['Bb', 'Bb major', 'A#', 'A# major'], '6B')
+        add_aliases(['Gm', 'G minor'], '6A')
+
+        # 7B = F major ; 7A = Dm
+        add_aliases(['F', 'F major', 'E#'], '7B')
+        add_aliases(['Dm', 'D minor'], '7A')
+
+        # 8B = C major ; 8A = Am
+        add_aliases(['C', 'C major', 'B#'], '8B')
+        add_aliases(['Am', 'A minor'], '8A')
+
+        # 9B = G major ; 9A = Em
+        add_aliases(['G', 'G major'], '9B')
+        add_aliases(['Em', 'E minor'], '9A')
+
+        # 10B = D major ; 10A = Bm
+        add_aliases(['D', 'D major'], '10B')
+        add_aliases(['Bm', 'B minor'], '10A')
+
+        # 11B = A major ; 11A = F#m
+        add_aliases(['A', 'A major'], '11B')
+        add_aliases(['F#m', 'F# minor', 'Gbm'], '11A')
+
+        # 12B = E major ; 12A = C#m
+        add_aliases(['E', 'E major'], '12B')
+        add_aliases(['C#m', 'C# minor', 'Dbm'], '12A')
+
+        # Some additional helpful aliases and common notations (with spaces, lower/upper case variants)
+        extras = {
+            'c': '8B', 'am': '8A', 'g': '9B', 'em': '9A', 'd': '10B', 'bm': '10A',
+            'a': '11B', 'f#m': '11A', 'e': '12B', 'c#m': '12A', 'bb': '6B', 'bbm': '3A'
+        }
+        for k, v in extras.items():
+            m[clean(k)] = v
+
+        # Finally return the alias map
+        return m
+
+    def _clean_key_input(self, key: str) -> str:
+        # tiny helper to produce normalized key string used for alias lookup
         if not key:
             return ""
+        s = str(key).strip()
+        s = s.replace('♭', 'b').replace('♯', '#')
+        s = s.replace('Major', '').replace('major', '')
+        s = s.replace('Minor', 'm').replace('minor', 'm')
+        s = re.sub(r'\s+', '', s)
+        return s
 
-        k = str(key).strip()
-        # normalize unicode accidentals
-        k = k.replace('♭', 'b').replace('♯', '#')
-        # normalize spacing and textual forms
-        k = re.sub(r'\s+', ' ', k)
-        k = k.replace(' Major', '').replace(' major', '')
-        k = k.replace(' Minor', 'm').replace(' minor', 'm')
-        k = k.replace(' m', 'm').replace('m ', 'm')
-
-        # Basic canonicalization: root letter upper, accidental as-is, optional 'm'
-        m = re.match(r'^([A-Ga-g])([b#]?)(m?)$', k.strip())
-        if m:
-            root = m.group(1).upper()
-            acc = m.group(2) or ''
-            suf = m.group(3) or ''
-            candidate = f"{root}{acc}{suf}"
-            # if mapping exists, return mapped canonical form
-            if candidate in self.key_mappings:
-                return self.key_mappings[candidate]
-
-            # If minor with a flat accidental (e.g. 'Dbm'), try enharmonic sharp mapping:
-            if suf == 'm' and acc == 'b':
-                flat_root = f"{root}b"
-                # common flat -> sharp enharmonic map (covers the useful set)
-                flat_to_sharp = {
-                    'Db': 'C#', 'Eb': 'D#', 'Ab': 'G#',
-                    'Bb': 'A#', 'Gb': 'F#', 'Cb': 'B'
-                }
-                sharp_root = flat_to_sharp.get(flat_root)
-                if sharp_root:
-                    enh_minor = sharp_root + 'm'
-                    # prefer the enharmonic minor if it's in key_mappings or the relative minors list
-                    if enh_minor in self.key_mappings or enh_minor in self.relative_minors.values():
-                        return self.key_mappings.get(enh_minor, enh_minor)
-
-            # otherwise return candidate (or its mapping)
-            return self.key_mappings.get(candidate, candidate)
-
-        # fallback: try direct dictionary lookup for anything unusual
-        k_clean = k.strip()
-        if k_clean in self.key_mappings:
-            return self.key_mappings[k_clean]
-
-        # final fallback: return cleaned key as-is
-        return k_clean
-    
-    def _build_compatibility_matrix(self) -> Dict[Tuple[str, str], float]:
-        # Build a simple heuristic compatibility between keys based on circle distance
-        matrix: Dict[Tuple[str, str], float] = {}
-        base_keys = list(self.circle_of_fifths)
-        minors = list(self.relative_minors.values())
-        all_keys = base_keys + minors
-        
-        # helper to compute distance on circle (0..6)
-        def circle_distance(a: str, b: str) -> int:
-            try:
-                ia = base_keys.index(a)
-                ib = base_keys.index(b)
-            except ValueError:
-                # if minor input, convert to relative major
-                ia = None
-                ib = None
-                for maj, minr in self.relative_minors.items():
-                    if minr == a:
-                        ia = base_keys.index(maj)
-                    if minr == b:
-                        ib = base_keys.index(maj)
-                # if still not found, fallback maximum distance
-                if ia is None or ib is None:
-                    return 6
-            d = abs(ia - ib)
-            return min(d, 12 - d)
-        
-        for a in all_keys:
-            for b in all_keys:
-                if a == b:
-                    matrix[(a, b)] = 1.0
-                    continue
-                # convert minor to relative major for distance purposes
-                ar = a[:-1] if a.endswith('m') else a
-                br = b[:-1] if b.endswith('m') else b
-                # default distance
-                try:
-                    dist = circle_distance(ar, br)
-                except Exception:
-                    dist = 6
-                # base compatibility by distance
-                if dist == 0:
-                    comp = 1.0
-                elif dist == 1:
-                    comp = 0.9
-                elif dist == 2:
-                    comp = 0.75
-                elif dist == 3:
-                    comp = 0.6
-                elif dist == 4:
-                    comp = 0.4
-                elif dist == 5:
-                    comp = 0.25
-                else:
-                    comp = 0.2
-                # minor/major relationship boosts
-                if a.endswith('m') and (not b.endswith('m')):
-                    # minor to its relative major
-                    if self.relative_minors.get(br) == a:
-                        comp = max(comp, 0.95)
-                if b.endswith('m') and (not a.endswith('m')):
-                    if self.relative_minors.get(ar) == b:
-                        comp = max(comp, 0.95)
-                # symmetric
-                matrix[(a, b)] = comp
-        return matrix
-    
-    def _get_circle_position(self, key: str) -> Optional[int]:
-        # Handle minor keys by converting to relative major
-        if key.endswith('m'):
-            for major, minor in self.relative_minors.items():
-                if minor == key:
-                    key = major
-                    break
-        try:
-            return self.circle_of_fifths.index(key)
-        except ValueError:
+    def key_to_camelot(self, key: str) -> Optional[str]:
+        """Return the Camelot code (e.g. '8A', '8B') for a given key string, or None if unknown."""
+        if not key:
             return None
-    
+        cleaned = self._clean_key_input(key).lower()
+        if cleaned in self.alias_to_camelot:
+            return self.alias_to_camelot[cleaned]
+        # Last-ditch attempts to handle awkward inputs:
+        # try with/without trailing 'm'
+        if cleaned.endswith('m') and cleaned[:-1] in self.alias_to_camelot:
+            return self.alias_to_camelot[cleaned[:-1]]
+        if (cleaned + 'm') in self.alias_to_camelot:
+            return self.alias_to_camelot[cleaned + 'm']
+        return None
+
+    def camelot_to_display(self, camelot_code: str) -> str:
+        """Return human-friendly 'Name (Camelot)' for display, e.g. 'Am (8A)'."""
+        name = self.camelot_to_key.get(camelot_code, camelot_code)
+        return f"{name} ({camelot_code})"
+
+    # ---- Camelot compatibility / scoring rules ----
+    def camelot_neighbors(self, code: str) -> List[str]:
+        """
+        Return immediate safe neighbors for a Camelot code:
+        - same number, opposite letter (A<->B)
+        - adjacent numbers +/-1 with same letter
+        """
+        if code not in self.camelot_to_key:
+            return []
+        # parse
+        m = re.match(r'(\d+)([AB])', code)
+        if not m:
+            return []
+        num = int(m.group(1))
+        letter = m.group(2)
+        neighbors = []
+        # same number opposite letter
+        other_letter = 'A' if letter == 'B' else 'B'
+        neighbors.append(f"{num}{other_letter}")
+        # adjacent numbers (wrap around 1..12)
+        prev_num = num - 1 if num > 1 else 12
+        next_num = num + 1 if num < 12 else 1
+        neighbors.append(f"{prev_num}{letter}")
+        neighbors.append(f"{next_num}{letter}")
+        return neighbors
+
+    def camelot_score(self, c1: str, c2: str) -> float:
+        """
+        Heuristic compatibility score between two Camelot codes (0..1).
+        Rules (typical DJ practice):
+         - same exact code: 1.0
+         - same number A<->B (relative major/minor): 0.95
+         - adjacent number, same letter (e.g., 8A -> 9A): 0.8
+         - adjacent number but A/B swap (less ideal): 0.6
+         - two-step adjacency (±2 same letter): 0.4
+         - otherwise small baseline 0.2
+        """
+        if c1 == c2:
+            return 1.0
+        # validate codes
+        if c1 not in self.camelot_to_key or c2 not in self.camelot_to_key:
+            return 0.2
+        n1, l1 = int(re.match(r'(\d+)', c1).group(1)), c1[-1]
+        n2, l2 = int(re.match(r'(\d+)', c2).group(1)), c2[-1]
+        if n1 == n2 and l1 != l2:
+            return 0.95
+        # compute circular distance
+        diff = min((n1 - n2) % 12, (n2 - n1) % 12)
+        if diff == 1:
+            return 0.8 if l1 == l2 else 0.6
+        if diff == 2:
+            return 0.45 if l1 == l2 else 0.35
+        return 0.2
+
+    # ---- Distance wrapper used by other logic (keeps previous API) ----
     def _distance_score(self, a: str, b: str) -> float:
-        # Return a compatibility-like score between 0 and 1
-        a = self._normalize_key(a)
-        b = self._normalize_key(b)
-        if a == b:
-            return 1.0
-        if (a, b) in self.compatibility_matrix:
-            return self.compatibility_matrix[(a, b)]
-        # fallback - compute by circle position
-        pa = self._get_circle_position(a)
-        pb = self._get_circle_position(b)
-        if pa is None or pb is None:
-            return 0.3
-        distance = abs(pa - pb) % 12
-        if distance == 0:
-            return 1.0
-        elif distance == 1:
-            return 0.9
-        elif distance == 2:
-            return 0.7
-        elif distance == 3:
-            return 0.4
-        elif distance == 4:  # Minor third
-            return 0.6
-        elif distance == 5:  # Perfect fourth
-            return 0.8
-        elif distance == 6:  # Opposite on circle
-            return 0.3
-        else:
-            return 0.5
+        ca = self.key_to_camelot(a) or ""
+        cb = self.key_to_camelot(b) or ""
+        if not ca or not cb:
+            # if unknown mapping, fallback to conservative low compatibility
+            return 0.25
+        return self.camelot_score(ca, cb)
 
-    def _to_major(self, key: str) -> Optional[str]:
-        """Convert a minor (e.g. 'Am') to its relative major ('C'), or return major unchanged."""
-        key = self._normalize_key(key)
-        if key.endswith('m'):
-            # Build reverse mapping from relative_minors
-            for major, minor in self.relative_minors.items():
-                if minor == key:
-                    return major
-            return None
-        return key
-
-    def _to_minor(self, key: str) -> Optional[str]:
-        """Convert a major (e.g. 'C') to its relative minor ('Am'), or return minor unchanged."""
-        key = self._normalize_key(key)
-        if not key.endswith('m'):
-            return self.relative_minors.get(key)
-        return key
-
+    # ---- Bridge suggestion (single keys, two-step chains, multi-hop chains) ----
     def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None) -> List[str]:
         """
-        Suggest keys that can bridge between key1 -> key2.
-        Returns a list of human-readable bridge suggestions (single keys or chains like 'C -> Am' or 'C -> G -> Em').
-        If available_keys is provided, prefer sequences that use those keys (useful if you want to mix *through* songs in the set).
+        Suggest camelot-keyed bridges between key1 -> key2.
+        Returns display strings like 'Am (8A)' or 'G#m (1A) -> D#m (2A)'.
+        If available_keys provided, we prefer chains that use those Camelot encodings.
         """
-        key1 = self._normalize_key(key1)
-        key2 = self._normalize_key(key2)
-        if available_keys:
-            available_keys = [self._normalize_key(k) for k in available_keys]
-        else:
-            available_keys = []
 
-        # If already compatible enough, nothing needed
-        direct_compat = self.compatibility_matrix.get((key1, key2), 0)
-        if direct_compat > 0.65:
+        c1 = self.key_to_camelot(key1)
+        c2 = self.key_to_camelot(key2)
+        if available_keys:
+            available_camelot = [self.key_to_camelot(k) for k in available_keys]
+            available_camelot = [x for x in available_camelot if x]
+        else:
+            available_camelot = []
+
+        # If either mapping unknown, try to be permissive: return a minimal suggestion based on any partial map
+        if not c1 or not c2:
+            # if one of the keys unknown, try to suggest using the known one
+            known = c1 or c2
+            if known:
+                # suggest neighbors of the known key
+                neigh = self.camelot_neighbors(known)
+                results = [self.camelot_to_display(n) for n in neigh if n in self.camelot_to_key]
+                return results[:6]
             return []
 
-        # Compose universe of candidate keys (majors + relative minors)
-        all_keys = list(self.circle_of_fifths) + list(self.relative_minors.values())
+        # If already compatible enough, no bridge needed
+        if self.camelot_score(c1, c2) >= 0.8:
+            return []
 
-        # Helper to get compatibility with safety default
-        def compat(a, b):
-            return self.compatibility_matrix.get((self._normalize_key(a), self._normalize_key(b)), 0.0)
+        # Universe of all camelot codes
+        all_codes = list(self.camelot_to_key.keys())
 
-        candidates = set()
+        # Helper to boost scores for using available keys
+        def boost_for_available(code: str) -> float:
+            return 0.12 if code in available_camelot else 0.0
 
-        # 1) Add obvious candidates: relative major/minor of each endpoint
-        rm1 = self._to_major(key1)
-        rm2 = self._to_major(key2)
-        if rm1:
-            candidates.add(self._normalize_key(rm1))
-            m1 = self._to_minor(rm1)
-            if m1:
-                candidates.add(self._normalize_key(m1))
-        if rm2:
-            candidates.add(self._normalize_key(rm2))
-            m2 = self._to_minor(rm2)
-            if m2:
-                candidates.add(self._normalize_key(m2))
-
-        # 2) Add keys that are near either key on the circle (neighbors/2-steps)
-        pos1 = self._get_circle_position(key1)
-        pos2 = self._get_circle_position(key2)
-        if pos1 is not None:
-            for offset in (-2, -1, 1, 2):
-                idx = (pos1 + offset) % 12
-                candidates.add(self.circle_of_fifths[idx])
-        if pos2 is not None:
-            for offset in (-2, -1, 1, 2):
-                idx = (pos2 + offset) % 12
-                candidates.add(self.circle_of_fifths[idx])
-
-        # 3) Add any key that has reasonable compatibility with both endpoints
-        for k in all_keys:
-            k_norm = self._normalize_key(k)
-            if k_norm == key1 or k_norm == key2:
+        # 1) Single-key candidates: any single Camelot code that reasonably connects both endpoints
+        single_candidates: List[Tuple[str, float]] = []
+        for cand in all_codes:
+            if cand in (c1, c2):
                 continue
-            if compat(key1, k_norm) > 0.35 and compat(k_norm, key2) > 0.35:
-                candidates.add(k_norm)
+            s = self.camelot_score(c1, cand) + self.camelot_score(cand, c2) + boost_for_available(cand)
+            # threshold: a single candidate should provide sensible combined compatibility.
+            if s > 1.2:  # tuned threshold (two 0.6 edges or better)
+                single_candidates.append((cand, s))
+        single_candidates.sort(key=lambda x: x[1], reverse=True)
 
-        # Score single-key candidates by combined compatibility
-        single_suggestions = []
-        for k in candidates:
-            score = compat(key1, k) + compat(k, key2)
-            if score > 0:  # some usefulness
-                # small boost to keys that exist in available_keys (so we encourage mixing through set)
-                if k in available_keys:
-                    score += 0.15
-                single_suggestions.append((k, score))
-        single_suggestions.sort(key=lambda x: x[1], reverse=True)
+        # 2) Two-step chains (A -> B)
+        two_step: List[Tuple[Tuple[str, str], float]] = []
+        for a in all_codes:
+            if a in (c1, c2):
+                continue
+            s1 = self.camelot_score(c1, a)
+            if s1 < 0.4:
+                continue
+            for b in all_codes:
+                if b in (c1, c2, a):
+                    continue
+                s2 = self.camelot_score(a, b)
+                s3 = self.camelot_score(b, c2)
+                if s2 < 0.35 or s3 < 0.35:
+                    continue
+                score = s1 + s2 + s3 + boost_for_available(a) + boost_for_available(b)
+                two_step.append(((a, b), score))
+        two_step.sort(key=lambda x: x[1], reverse=True)
 
-        # --- Beam search for multi-hop chains (up to max_hops) ---
-        def find_chains(max_hops: int = 4, beam_width: int = 60, min_edge_compat: float = 0.35):
-            """
-            Beam-search style pathfinder that finds sequences from key1 to key2 (excluding key1 in formatted result).
-            Returns list of (path_list, score) where path_list includes intermediate keys and ends with key2.
-            """
-            beams = [([key1], 0.0)]
-            results = []
-
+        # 3) Multi-hop beam search (up to 4 hops) using Camelot adjacency scoring
+        def find_chains(max_hops=4, beam_width=60, min_edge_score=0.35):
+            beams = [([c1], 0.0)]
+            results: List[Tuple[List[str], float]] = []
             for depth in range(1, max_hops + 1):
                 new_beams = []
                 for path, score in beams:
                     last = path[-1]
-                    # consider neighbors from all_keys
-                    for k in all_keys:
-                        k_norm = self._normalize_key(k)
-                        if k_norm in path:
+                    for cand in all_codes:
+                        if cand in path:
                             continue
-                        edge_c = compat(last, k_norm)
-                        if edge_c < min_edge_compat:
+                        edge = self.camelot_score(last, cand)
+                        if edge < min_edge_score:
                             continue
-                        # boost nodes that are in available_keys
-                        node_boost = 0.12 if k_norm in available_keys else 0.0
-                        new_score = score + edge_c + node_boost
-                        new_path = path + [k_norm]
-                        if k_norm == key2:
-                            # record the full path (excluding starting key for display)
+                        new_score = score + edge + boost_for_available(cand)
+                        new_path = path + [cand]
+                        if cand == c2:
+                            # store the intermediate nodes (excluding starting key)
                             results.append((new_path[1:], new_score))
                         else:
                             new_beams.append((new_path, new_score))
-                # prune and continue
                 beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_width]
-            # sort results best-first
             results.sort(key=lambda x: x[1], reverse=True)
             return results
 
-        chain_results = find_chains(max_hops=4, beam_width=80, min_edge_compat=0.35)
+        chain_results = find_chains(max_hops=4, beam_width=80, min_edge_score=0.32)
 
-        # Format results: single suggestions first, then chain suggestions
+        # Format output: prefer single candidates, then two-step, then multi-hop
         results: List[str] = []
-        # Add up to 4 top single-key suggestions
-        for k, score in single_suggestions[:4]:
-            if k not in (key1, key2) and k not in results:
-                results.append(k)
 
-        # Add chain suggestions from the dedicated chain search
-        # Format chains like 'A -> B' or 'A -> B -> C'
-        for path, score in chain_results[:6]:
-            formatted = " -> ".join(path)
+        # Add top single candidates (displayed as 'Name (Code)')
+        for cand, score in single_candidates[:4]:
+            disp = self.camelot_to_display(cand)
+            if disp not in results:
+                results.append(disp)
+
+        # Add top two-step chains
+        for (a, b), score in two_step[:4]:
+            formatted = f"{self.camelot_to_display(a)} -> {self.camelot_to_display(b)}"
             if formatted not in results:
                 results.append(formatted)
 
-        # If still nothing, fall back to simple two-step try (keeps prior behavior)
-        if not results:
-            # build two-step chain suggestions (previous approach)
-            chain_suggestions = []
-            for a in all_keys:
-                a_norm = self._normalize_key(a)
-                if a_norm in (key1, key2):
-                    continue
-                if compat(key1, a_norm) < 0.4:
-                    continue
-                for b in all_keys:
-                    b_norm = self._normalize_key(b)
-                    if b_norm in (key1, key2, a_norm):
-                        continue
-                    if compat(a_norm, b_norm) < 0.4:
-                        continue
-                    if compat(b_norm, key2) < 0.4:
-                        continue
-                    score = compat(key1, a_norm) + compat(a_norm, b_norm) + compat(b_norm, key2)
-                    # small boosts for available_keys
-                    if a_norm in available_keys:
-                        score += 0.1
-                    if b_norm in available_keys:
-                        score += 0.1
-                    chain_suggestions.append(((a_norm, b_norm), score))
-            chain_suggestions.sort(key=lambda x: x[1], reverse=True)
-            for (a, b), score in chain_suggestions[:4]:
-                formatted = f"{a} -> {b}"
-                if formatted not in results:
-                    results.append(formatted)
+        # Add multi-hop chain results (format chain of codes into display names)
+        for path, score in chain_results[:6]:
+            formatted = " -> ".join(self.camelot_to_display(p) for p in path)
+            if formatted not in results:
+                results.append(formatted)
 
-        # Fallback: if nothing found, suggest stepping halfway around the circle (median key)
+        # Fallback: if nothing found (rare), return neighbors of c1 that move toward c2 numerically
         if not results:
-            if pos1 is not None and pos2 is not None:
-                # Compute halfway position (clockwise)
-                dist = (pos2 - pos1) % 12
-                half = (pos1 + dist // 2) % 12
-                fallback = self.circle_of_fifths[half]
-                results.append(fallback)
+            # attempt simple neighbor-based guidance
+            neighbors = self.camelot_neighbors(c1)
+            for n in neighbors:
+                if n in self.camelot_to_key:
+                    results.append(self.camelot_to_display(n))
+            # as final fallback, show the direct number-match (A/B swap)
+            if not results and f"{int(re.match(r'(\d+)', c1).group(1))}{('A' if c1.endswith('B') else 'B')}" in self.camelot_to_key:
+                alt = f"{int(re.match(r'(\d+)', c1).group(1))}{('A' if c1.endswith('B') else 'B')}"
+                results.append(self.camelot_to_display(alt))
 
-        # Limit output to 8 suggestions for UI clarity
         return results[:8]
-    
+
+    # ---- Sequencing and analysis (uses Camelot distance) ----
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
-        # Simple reordering to minimize harmonic jumps: greedy nearest neighbor
         if not songs:
             return []
         remaining = songs[:]
@@ -458,7 +376,7 @@ class HarmonicSequencer:
                     best_idx = i
             seq.append(remaining.pop(best_idx))
         return seq
-    
+
     def find_mixing_pairs(self, songs: List[Song]) -> List[Tuple[Song, Song, float]]:
         pairs = []
         for i in range(len(songs) - 1):
@@ -467,24 +385,23 @@ class HarmonicSequencer:
             score = self._distance_score(a.key, b.key)
             pairs.append((a, b, score))
         return pairs
-    
+
     def analyze_song_collection(self, songs: List[Song]) -> Dict:
+        # Normalize and assign camelot codes to each song
         for song in songs:
-            song.key = self._normalize_key(song.key)
-        
+            song.key = song.key or ""
+            song.camelot = self.key_to_camelot(song.key)
+            # if we couldn't map, leave None — downstream logic will handle it
         sequence = self.create_harmonic_sequence(songs)
         mixing_pairs = self.find_mixing_pairs(songs)
-        
-        # Prepare a list of keys that exist in the set so suggest_bridge_keys can prefer paths
+
         existing_keys = [s.key for s in songs]
-        
         gaps_and_bridges = []
         for i in range(len(sequence) - 1):
             a = sequence[i]
             b = sequence[i + 1]
             score = self._distance_score(a.key, b.key)
             if score < 0.6:
-                # pass the existing keys so the bridge suggestion can prefer using them
                 suggestions = self.suggest_bridge_keys(a.key, b.key, available_keys=existing_keys)
                 gaps_and_bridges.append({
                     'from': a,
@@ -492,7 +409,6 @@ class HarmonicSequencer:
                     'score': score,
                     'suggestions': suggestions
                 })
-        
         return {
             'sequence': sequence,
             'mixing_pairs': mixing_pairs,
@@ -508,7 +424,6 @@ def fetch_bpm_from_web(title: str, artist: str) -> Optional[int]:
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(r.text, 'html.parser')
-        # try to find bpm numbers
         text = soup.get_text()
         m = re.search(r'(\d{2,3})\s?BPM', text, re.IGNORECASE)
         if m:
@@ -518,11 +433,11 @@ def fetch_bpm_from_web(title: str, artist: str) -> Optional[int]:
     return None
 
 # ---- Streamlit UI ----
-st.title("Harmonic Song Analyzer 🎧")
-st.write("Upload a CSV or paste a list of songs to analyze harmonic flow and suggest bridge keys/sequences.")
+st.title("Harmonic Song Analyzer 🎧 (Camelot)")
+st.write("Upload a CSV or paste a list of songs to analyze harmonic flow and suggest bridge keys/sequences using the Camelot system.")
 
 uploaded = st.file_uploader("Upload CSV of songs (title,artist,key,tempo?)", type=["csv"])
-text_input = st.text_area("Or paste CSV/text (title,artist,key,tempo)", height=120)
+text_input = st.text_area("Or paste CSV/text (title,artist,key,tempo)", height=140)
 
 songs: List[Song] = []
 
@@ -559,56 +474,65 @@ if text_input and not songs:
 
 st.sidebar.header("Options")
 shuffle = st.sidebar.checkbox("Shuffle input order before sequencing", value=False)
-show_raw = st.sidebar.checkbox("Show normalized keys", value=True)
+show_raw = st.sidebar.checkbox("Show normalized keys & Camelot codes", value=True)
 
 if songs:
     hs = HarmonicSequencer()
     if shuffle:
         np.random.shuffle(songs)
-    
+
     # attempt to fetch missing tempos
     for s in songs:
         if s.tempo is None:
             s.tempo = fetch_bpm_from_web(s.title, s.artist)
-            time.sleep(0.2)
-    
+            time.sleep(0.18)
+
     analysis = hs.analyze_song_collection(songs)
     seq = analysis['sequence']
     mixing_pairs = analysis['mixing_pairs']
     gaps_and_bridges = analysis['gaps_and_bridges']
-    
+
     st.header("Recommended Play Order")
     rows = []
     for i, s in enumerate(seq):
+        camelot_display = hs.camelot_to_display(s.camelot) if s.camelot else f"(unknown)"
         rows.append({
             'Order': i + 1,
             'Title': s.title,
             'Artist': s.artist,
-            'Key': s.key,
+            'Key (input)': s.key,
+            'Camelot': camelot_display,
             'Tempo': s.tempo or ''
         })
     df_display = pd.DataFrame(rows)
     st.dataframe(df_display)
-    
-    st.header("Mixing Pair Scores")
+
+    st.header("Mixing Pair Scores (Camelot-based)")
     mp_rows = []
     for a, b, score in mixing_pairs:
+        a_c = hs.camelot_to_display(a.camelot) if a.camelot else "(unknown)"
+        b_c = hs.camelot_to_display(b.camelot) if b.camelot else "(unknown)"
         mp_rows.append({
-            'From': f"{a.title} - {a.artist} ({a.key})",
-            'To': f"{b.title} - {b.artist} ({b.key})",
+            'From': f"{a.title} - {a.artist} {a_c}",
+            'To': f"{b.title} - {b.artist} {b_c}",
             'Score': round(score, 2)
         })
     st.table(pd.DataFrame(mp_rows))
-    
+
     if gaps_and_bridges:
-        st.header("Harmonic Gaps & Bridge Suggestions")
+        st.header("Harmonic Gaps & Bridge Suggestions (Camelot)")
         for gb in gaps_and_bridges:
             a = gb['from']
             b = gb['to']
-            st.subheader(f"{a.title} ({a.key}) → {b.title} ({b.key}) — score {gb['score']:.2f}")
-            st.write("Bridge suggestions (single keys, then multi-step sequences — sequences prefer keys already in your set):")
-            for s in gb['suggestions']:
-                st.write(f"- {s}")
+            a_disp = hs.camelot_to_display(a.camelot) if a.camelot else a.key
+            b_disp = hs.camelot_to_display(b.camelot) if b.camelot else b.key
+            st.subheader(f"{a.title} — {a_disp}  →  {b.title} — {b_disp} — score {gb['score']:.2f}")
+            st.write("Bridge suggestions (single keys first, then sequences; displayed as 'Name (Camelot)'):")
+            if gb['suggestions']:
+                for s in gb['suggestions']:
+                    st.write(f"- {s}")
+            else:
+                st.write("- (no suggestions found)")
             st.write("---")
     else:
         st.success("No major harmonic gaps detected — your order flows well!")
@@ -617,5 +541,8 @@ else:
 
 # ---- Footer / credits ----
 st.markdown("---")
-st.markdown("Built with ❤️ — Harmonic suggestions are heuristic-based to help DJs and playlist curators. "
-            "Use your ears and musical judgement; these are suggestions, not rules.")
+st.markdown(
+    "Built with ❤️ — Harmonic suggestions now use the **Camelot** system. "
+    "Each input key is deterministically mapped to a single Camelot code so suggestions are consistent. "
+    "These are heuristics to help mixing — always trust your ears."
+)
