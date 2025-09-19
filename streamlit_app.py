@@ -369,19 +369,20 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
 # -----------------------
 class HarmonicSequencer:
     def __init__(self):
+        # Use standard music theory notation (sharps for major keys, context-appropriate for minors)
         self.camelot_to_key: Dict[str, str] = {
-            '1A': 'G#m', '1B': 'B',
-            '2A': 'D#m', '2B': 'F#',
-            '3A': 'Bbm', '3B': 'Db',
-            '4A': 'Fm', '4B': 'Ab',
-            '5A': 'Cm', '5B': 'Eb',
-            '6A': 'Gm', '6B': 'Bb',
-            '7A': 'Dm', '7B': 'F',
-            '8A': 'Am', '8B': 'C',
-            '9A': 'Em', '9B': 'G',
-            '10A': 'Bm', '10B': 'D',
-            '11A': 'F#m', '11B': 'A',
-            '12A': 'C#m', '12B': 'E'
+            '1A': 'G#m', '1B': 'B',      # G# minor / B major
+            '2A': 'D#m', '2B': 'F#',     # D# minor / F# major  
+            '3A': 'A#m', '3B': 'C#',     # A# minor / C# major
+            '4A': 'Fm',  '4B': 'G#',     # F minor / G# major
+            '5A': 'Cm',  '5B': 'D#',     # C minor / D# major
+            '6A': 'Gm',  '6B': 'A#',     # G minor / A# major
+            '7A': 'Dm',  '7B': 'F',      # D minor / F major
+            '8A': 'Am',  '8B': 'C',      # A minor / C major
+            '9A': 'Em',  '9B': 'G',      # E minor / G major
+            '10A': 'Bm', '10B': 'D',     # B minor / D major
+            '11A': 'F#m', '11B': 'A',    # F# minor / A major
+            '12A': 'C#m', '12B': 'E'     # C# minor / E major
         }
         self.alias_to_camelot: Dict[str, str] = self._build_alias_map()
         self.camelot_codes: List[str] = list(self.camelot_to_key.keys())
@@ -391,8 +392,11 @@ class HarmonicSequencer:
             if not k:
                 return ""
             s = str(k).strip()
+            # Handle Unicode musical symbols that might appear in data
             s = s.replace('♭', 'b').replace('♯', '#')
-            s = s.replace(' Major', '').replace(' minor', 'm').replace(' Minor', 'm').replace(' major', '')
+            # Remove spaces and case variations in major/minor
+            s = s.replace(' Major', '').replace(' major', '')
+            s = s.replace(' Minor', 'm').replace(' minor', 'm')
             s = re.sub(r'\s+', '', s)
             return s.lower()
 
@@ -401,38 +405,54 @@ class HarmonicSequencer:
             for a in aliases:
                 m[clean(a)] = code
 
-        add_aliases(['B', 'B major', 'Cb'], '1B')
-        add_aliases(['G#m', 'Abm', 'G# minor', 'Ab minor'], '1A')
-        add_aliases(['F#', 'F# major', 'Gb'], '2B')
-        add_aliases(['D#m', 'Ebm', 'D# minor', 'Eb minor'], '2A')
+        # 1A/1B - B major / G#m (Ab minor)
+        add_aliases(['B', 'B major', 'Cb', 'Cb major'], '1B')
+        add_aliases(['G#m', 'G# minor', 'Abm', 'Ab minor'], '1A')
+        
+        # 2A/2B - F# major / D#m (Eb minor) 
+        add_aliases(['F#', 'F# major', 'Gb', 'Gb major'], '2B')
+        add_aliases(['D#m', 'D# minor', 'Ebm', 'Eb minor'], '2A')
+        
+        # 3A/3B - Db major / Bbm (A# minor)
         add_aliases(['Db', 'Db major', 'C#', 'C# major'], '3B')
-        add_aliases(['Bbm', 'A#m', 'Bb minor', 'A# minor'], '3A')
+        add_aliases(['Bbm', 'Bb minor', 'A#m', 'A# minor'], '3A')
+        
+        # 4A/4B - Ab major / Fm
         add_aliases(['Ab', 'Ab major', 'G#', 'G# major'], '4B')
         add_aliases(['Fm', 'F minor'], '4A')
+        
+        # 5A/5B - Eb major / Cm
         add_aliases(['Eb', 'Eb major', 'D#', 'D# major'], '5B')
         add_aliases(['Cm', 'C minor'], '5A')
+        
+        # 6A/6B - Bb major / Gm
         add_aliases(['Bb', 'Bb major', 'A#', 'A# major'], '6B')
         add_aliases(['Gm', 'G minor'], '6A')
-        add_aliases(['F', 'F major', 'E#'], '7B')
+        
+        # 7A/7B - F major / Dm
+        add_aliases(['F', 'F major'], '7B')
         add_aliases(['Dm', 'D minor'], '7A')
-        add_aliases(['C', 'C major', 'B#'], '8B')
+        
+        # 8A/8B - C major / Am
+        add_aliases(['C', 'C major'], '8B')
         add_aliases(['Am', 'A minor'], '8A')
+        
+        # 9A/9B - G major / Em
         add_aliases(['G', 'G major'], '9B')
         add_aliases(['Em', 'E minor'], '9A')
+        
+        # 10A/10B - D major / Bm
         add_aliases(['D', 'D major'], '10B')
         add_aliases(['Bm', 'B minor'], '10A')
+        
+        # 11A/11B - A major / F#m (Gb minor)
         add_aliases(['A', 'A major'], '11B')
-        add_aliases(['F#m', 'F# minor', 'Gbm'], '11A')
+        add_aliases(['F#m', 'F# minor', 'Gbm', 'Gb minor'], '11A')
+        
+        # 12A/12B - E major / C#m (Db minor)
         add_aliases(['E', 'E major'], '12B')
-        add_aliases(['C#m', 'C# minor', 'Dbm'], '12A')
+        add_aliases(['C#m', 'C# minor', 'Dbm', 'Db minor'], '12A')
 
-        extras = {
-            'c': '8B', 'am': '8A', 'g': '9B', 'em': '9A',
-            'd': '10B', 'bm': '10A', 'a': '11B', 'f#m': '11A',
-            'e': '12B', 'c#m': '12A', 'bb': '6B', 'bbm': '3A'
-        }
-        for k, v in extras.items():
-            m[clean(k)] = v
         return m
 
     def _clean_key_input(self, key: str) -> str:
