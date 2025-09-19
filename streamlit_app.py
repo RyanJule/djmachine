@@ -47,7 +47,7 @@ def extract_spotify_playlist_id(spotify_url: str) -> Optional[str]:
         return s
     return None
 
-def fetch_songdata_playlist(spotify_url: str, timeout: float = 8.0) -> Tuple[List[Song], str]:
+def fetch_songdata_playlist(spotify_url: str, timeout: float = 300.0) -> Tuple[List[Song], str]:
     """
     Given a spotify url/uri/id, build the songdata playlist url and attempt to parse the song table.
     Returns (songs_list, songdata_url). Raises RuntimeError with helpful message on failure.
