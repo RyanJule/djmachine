@@ -760,19 +760,120 @@ class HarmonicSequencer:
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
         if not songs:
             return []
-        remaining = songs[:]
-        seq = [remaining.pop(0)]
-        while remaining:
-            last = seq[-1]
-            best_idx = 0
-            best_score = -1.0
-            for i, s in enumerate(remaining):
-                score = self._distance_score(last.key, s.key)
+        
+        if len(songs) == 1:
+            return songs[:]
+        
+        # Strategy: Use a more sophisticated algorithm that considers the entire collection
+        # Rather than greedy "next best", we'll use a approach that minimizes total harmonic gaps
+        
+        def calculate_total_sequence_score(sequence: List[Song]) -> float:
+            """Calculate the total harmonic score for a complete sequence"""
+            if len(sequence) <= 1:
+                return 0.0
+            
+            total_score = 0.0
+            for i in range(len(sequence) - 1):
+                score = self._distance_score(sequence[i].key, sequence[i + 1].key)
+                total_score += score
+            return total_score / (len(sequence) - 1)  # Average score per transition
+        
+        # For small collections, try all permutations (up to ~8 songs)
+        if len(songs) <= 8:
+            from itertools import permutations
+            
+            best_sequence = songs[:]
+            best_score = calculate_total_sequence_score(best_sequence)
+            
+            # Try different starting songs to find globally optimal sequence
+            for perm in permutations(songs):
+                score = calculate_total_sequence_score(list(perm))
                 if score > best_score:
                     best_score = score
-                    best_idx = i
-            seq.append(remaining.pop(best_idx))
-        return seq
+                    best_sequence = list(perm)
+            
+            return best_sequence
+        
+        # For larger collections, use improved heuristic approach
+        else:
+            # Group songs by their camelot codes
+            camelot_groups = {}
+            for song in songs:
+                camelot = self.key_to_camelot(song.key) or "unknown"
+                if camelot not in camelot_groups:
+                    camelot_groups[camelot] = []
+                camelot_groups[camelot].append(song)
+            
+            # Start with the most common key or a strategic choice
+            remaining_songs = songs[:]
+            sequence = []
+            
+            # Choose starting song: prefer keys that have neighbors in the collection
+            def count_harmonic_connections(song: Song) -> int:
+                """Count how many other songs this song connects well to"""
+                camelot = self.key_to_camelot(song.key)
+                if not camelot:
+                    return 0
+                
+                neighbors = self.camelot_neighbors(camelot)
+                connections = 0
+                for other_song in remaining_songs:
+                    if other_song == song:
+                        continue
+                    other_camelot = self.key_to_camelot(other_song.key)
+                    if other_camelot in neighbors or other_camelot == camelot:
+                        connections += 1
+                return connections
+            
+            # Start with song that has most harmonic connections
+            start_song = max(remaining_songs, key=count_harmonic_connections)
+            sequence.append(start_song)
+            remaining_songs.remove(start_song)
+            
+            # Build sequence using improved lookahead
+            while remaining_songs:
+                current_song = sequence[-1]
+                current_camelot = self.key_to_camelot(current_song.key)
+                
+                if not current_camelot:
+                    # If we can't determine key, fall back to first remaining
+                    next_song = remaining_songs[0]
+                else:
+                    # Look for best next song considering:
+                    # 1. Direct harmonic compatibility
+                    # 2. Whether it helps connect to other remaining songs
+                    # 3. Whether we have multiple songs in the same key (group them)
+                    
+                    def evaluate_next_song(candidate: Song) -> float:
+                        candidate_camelot = self.key_to_camelot(candidate.key)
+                        
+                        # Base harmonic score to this candidate
+                        base_score = self._distance_score(current_song.key, candidate.key)
+                        
+                        # Bonus for grouping songs of same key together
+                        same_key_bonus = 0.0
+                        same_key_songs = [s for s in remaining_songs if self.key_to_camelot(s.key) == candidate_camelot]
+                        if len(same_key_songs) > 1:
+                            same_key_bonus = 0.1  # Small bonus to group same keys
+                        
+                        # Bonus for songs that connect well to many remaining songs
+                        remaining_after = [s for s in remaining_songs if s != candidate]
+                        connection_bonus = 0.0
+                        if remaining_after and candidate_camelot:
+                            neighbors = self.camelot_neighbors(candidate_camelot)
+                            connections = sum(1 for s in remaining_after 
+                                        if self.key_to_camelot(s.key) in neighbors or 
+                                            self.key_to_camelot(s.key) == candidate_camelot)
+                            connection_bonus = (connections / len(remaining_after)) * 0.05
+                        
+                        return base_score + same_key_bonus + connection_bonus
+                    
+                    next_song = max(remaining_songs, key=evaluate_next_song)
+                
+                sequence.append(next_song)
+                remaining_songs.remove(next_song)
+            
+            return sequence
 
     def find_mixing_pairs(self, songs: List[Song]) -> List[Tuple[Song, Song, float]]:
         pairs = []
