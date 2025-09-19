@@ -589,18 +589,21 @@ class HarmonicSequencer:
                     # Move clockwise
                     while current_num != dest_num:
                         current_num = (current_num % 12) + 1
-                        path.append(f"{current_num}{dest_letter}")
+                        if current_num != dest_num:  # Don't include destination
+                            path.append(f"{current_num}{dest_letter}")
                 else:
                     # Move counter-clockwise
                     while current_num != dest_num:
                         current_num = ((current_num - 2) % 12) + 1
-                        path.append(f"{current_num}{dest_letter}")
+                        if current_num != dest_num:  # Don't include destination
+                            path.append(f"{current_num}{dest_letter}")
                 
-                # Score based on number of perfect transitions (0.8 per step)
-                base_score = 0.8
-                total_boost = sum(available_boost(step) for step in path)
-                score = base_score + (total_boost / len(path))
-                optimal_paths.append((path, score))
+                # Only add path if it has bridge steps (excluding destination)
+                if len(path) > 0:
+                    base_score = 0.8
+                    total_boost = sum(available_boost(step) for step in path)
+                    score = base_score + (total_boost / len(path))
+                    optimal_paths.append((path, score))
         
         # Path 2: Move around wheel first, then change letter
         if source_num != dest_num:
@@ -615,22 +618,34 @@ class HarmonicSequencer:
                 # Move clockwise
                 while current_num != dest_num:
                     current_num = (current_num % 12) + 1
-                    path.append(f"{current_num}{source_letter}")
+                    if current_num != dest_num:  # Don't include destination
+                        path.append(f"{current_num}{source_letter}")
             else:
                 # Move counter-clockwise  
                 while current_num != dest_num:
                     current_num = ((current_num - 2) % 12) + 1
-                    path.append(f"{current_num}{source_letter}")
+                    if current_num != dest_num:  # Don't include destination
+                        path.append(f"{current_num}{source_letter}")
             
-            # Then switch letter if needed
-            if source_letter != dest_letter:
+            # Then switch letter if needed (but not if we're at destination number)
+            if source_letter != dest_letter and len(path) > 0:
+                # Add the letter change step at the destination number
+                path.append(f"{dest_num}{dest_letter}")
+            elif source_letter != dest_letter and len(path) == 0:
+                # Direct letter change at destination number
                 path.append(f"{dest_num}{dest_letter}")
             
-            # Score based on perfect harmonic transitions
-            base_score = 0.8
-            total_boost = sum(available_boost(step) for step in path)
-            score = base_score + (total_boost / len(path))
-            optimal_paths.append((path, score))
+            # Only add path if it has bridge steps and doesn't end with destination
+            if len(path) > 0:
+                # Remove destination from path if it got added
+                if path[-1] == c2:
+                    path = path[:-1]
+                
+                if len(path) > 0:  # Only add if there are still bridge steps
+                    base_score = 0.8
+                    total_boost = sum(available_boost(step) for step in path)
+                    score = base_score + (total_boost / len(path))
+                    optimal_paths.append((path, score))
         
         # Path 3: If same number, direct relative major/minor
         if source_num == dest_num and source_letter != dest_letter:
