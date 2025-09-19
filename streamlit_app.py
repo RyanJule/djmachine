@@ -535,6 +535,8 @@ class HarmonicSequencer:
     # Bridge logic (single, two-step, multi-hop) preserved...
     # Replace the suggest_bridge_keys method in your HarmonicSequencer class with this version:
 
+    # Replace the suggest_bridge_keys method in your HarmonicSequencer class with this version:
+
     def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None,
                             max_hops: int = 4, beam_width: int = 80) -> List[str]:
         c1 = self.key_to_camelot(key1)
@@ -646,45 +648,62 @@ class HarmonicSequencer:
         
         # Collect single-step bridges
         for cand, score in single_candidates:
+            # Skip if bridge uses either source or destination key
+            if cand in (c1, c2):
+                continue
             disp = self.camelot_to_display(cand)
             formatted = f"{disp}"
             all_candidates.append((formatted, score))
 
         # Collect two-step bridges
         for (a, b), score in two_step:
+            # Skip if any step in path uses source or destination key
+            if a in (c1, c2) or b in (c1, c2):
+                continue
             path_display = f"{self.camelot_to_display(a)} -> {self.camelot_to_display(b)}"
             all_candidates.append((path_display, score))
 
         # Collect multi-step bridges
         for path, score in chain_results:
+            # Skip if any step in path uses source or destination key
+            if any(step in (c1, c2) for step in path):
+                continue
             path_display = " -> ".join(self.camelot_to_display(p) for p in path)
             all_candidates.append((path_display, score))
 
-        # Sort ALL candidates by score (highest first), regardless of path length
+        # Sort ALL candidates by score (highest first)
         all_candidates.sort(key=lambda x: x[1], reverse=True)
         
-        # Format with scores and remove duplicates while preserving order
+        # Only return paths with the highest score (or tied for highest)
+        if not all_candidates:
+            # Fallback if no valid bridges found
+            neigh = self.camelot_neighbors(c1)
+            results = []
+            for n in neigh:
+                if n in self.camelot_to_key and n not in (c1, c2):
+                    fallback_score = self.camelot_score(c1, n)
+                    formatted = f"{self.camelot_to_display(n)} (score: {fallback_score:.3f})"
+                    results.append(formatted)
+            return results[:3]  # Return top 3 fallback options
+        
+        # Get the highest score
+        highest_score = all_candidates[0][1]
+        
+        # Filter to only include paths with the highest score (allowing for small floating point differences)
+        tolerance = 0.001  # Small tolerance for floating point comparison
+        top_candidates = [(path, score) for path, score in all_candidates 
+                        if abs(score - highest_score) <= tolerance]
+        
+        # Format results with scores and remove duplicates
         results: List[str] = []
         seen_paths = set()
-        for path_display, score in all_candidates:
+        for path_display, score in top_candidates:
             if path_display not in seen_paths:
                 formatted = f"{path_display} (score: {score:.3f})"
                 results.append(formatted)
                 seen_paths.add(path_display)
-                if len(results) >= 8:  # Limit to top 8 results
-                    break
 
-        # Fallback if no good bridges found
-        if not results:
-            neigh = self.camelot_neighbors(c1)
-            for n in neigh:
-                if n in self.camelot_to_key:
-                    # Calculate score for fallback neighbors
-                    fallback_score = self.camelot_score(c1, n)
-                    formatted = f"{self.camelot_to_display(n)} (score: {fallback_score:.3f})"
-                    results.append(formatted)
-
-        return results[:8]
+        return results
     # Sequencing helpers (unchanged)
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
         if not songs:
