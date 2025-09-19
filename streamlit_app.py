@@ -754,19 +754,8 @@ with left_col:
     st.markdown("---")
     st.header("Options")
     shuffle_flag = st.checkbox("Shuffle input order before sequencing", value=False, key="shuffle_checkbox")
-    show_normalized = st.checkbox("Show normalized keys & Camelot codes", value=True, key="show_normalized_checkbox")
     auto_bpm = st.checkbox("Attempt to fetch missing tempos (slow)", value=False, key="auto_bpm_checkbox")
-    st.markdown("Advanced bridge options:")
-    max_bridge_hops = st.slider("Max bridge hops (beam search depth)", min_value=2, max_value=5, value=4, key="max_bridge_hops_slider")
-    beam_width = st.slider("Beam width (search pruning)", min_value=20, max_value=200, value=80, key="beam_width_slider")
-    st.markdown("---")
-    st.header("Export / Save")
-    # If you have export buttons, add keys:
-    # st.button("Export playlist", key="export_playlist_btn")
-
-# ...existing code...
-    # export in right pane
-
+    
 songs: List[Song] = []
 
 # Uploaded CSV
@@ -797,7 +786,7 @@ if uploaded_file:
 
         key_col = detect_key_col_in_df(df)
         for _, r in df.iterrows():
-            title = str(r.get('title') or r.get('Title') or r.get('song') or r.get('Song') or "")
+            title = str(r.get('Track') or r.get('Title') or r.get('song') or r.get('Song') or "")
             artist = str(r.get('artist') or r.get('Artist') or "")
             tempo = None
             if 'tempo' in r and pd.notna(r.get('tempo')):
@@ -907,7 +896,6 @@ with right_col:
                 'Order': i + 1,
                 'Title': s.title,
                 'Artist': s.artist,
-                'Input Key': s.key,
                 'Camelot': hs.camelot_to_display(s.camelot) if s.camelot else '',
                 'Tempo': s.tempo or ''
             })
