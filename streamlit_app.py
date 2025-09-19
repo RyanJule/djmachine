@@ -538,7 +538,7 @@ class HarmonicSequencer:
     # Replace the suggest_bridge_keys method in your HarmonicSequencer class with this version:
 
     def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None,
-                            max_hops: int = 4, beam_width: int = 80) -> List[str]:
+                        max_hops: int = 4, beam_width: int = 80) -> List[str]:
         c1 = self.key_to_camelot(key1)
         c2 = self.key_to_camelot(key2)
         
@@ -558,139 +558,105 @@ class HarmonicSequencer:
         source_num, source_letter = int(m1.group(1)), m1.group(2)
         dest_num, dest_letter = int(m2.group(1)), m2.group(2)
         
-        def available_boost(code: str) -> float:
+        def get_available_marker(code: str) -> str:
             if not available_keys:
-                return 0.0
+                return ""
             available_camelot = [self.key_to_camelot(k) for k in available_keys]
-            return 0.15 if code in available_camelot else 0.0
+            return " ★" if code in available_camelot else ""
         
-        # Generate all optimal harmonic paths deterministically
-        optimal_paths = []
+        # Generate all valid harmonic paths between the two keys
+        harmonic_paths = []
         
-        # Path 1: Change letter first, then move around the wheel
-        if source_letter != dest_letter:
-            # Step 1: Switch to opposite letter (relative major/minor)
-            intermediate1 = f"{source_num}{dest_letter}"
+        # Helper function to create wheel movement path
+        def create_wheel_path(start_num: int, end_num: int, letter: str, exclude_endpoints: bool = True) -> List[str]:
+            if start_num == end_num:
+                return []
             
-            if source_num == dest_num:
-                # Direct relative major/minor switch
-                score = 0.95 + available_boost(intermediate1)
-                optimal_paths.append(([intermediate1], score))
-            else:
-                # Switch letter, then move around wheel
-                path = [intermediate1]
-                current_num = source_num
-                
-                # Calculate shortest distance around the wheel
-                clockwise_distance = (dest_num - current_num) % 12
-                counter_clockwise_distance = (current_num - dest_num) % 12
-                
-                if clockwise_distance <= counter_clockwise_distance:
-                    # Move clockwise
-                    while current_num != dest_num:
-                        current_num = (current_num % 12) + 1
-                        if current_num != dest_num:  # Don't include destination
-                            path.append(f"{current_num}{dest_letter}")
-                else:
-                    # Move counter-clockwise
-                    while current_num != dest_num:
-                        current_num = ((current_num - 2) % 12) + 1
-                        if current_num != dest_num:  # Don't include destination
-                            path.append(f"{current_num}{dest_letter}")
-                
-                # Only add path if it has bridge steps (excluding destination)
-                if len(path) > 0:
-                    base_score = 0.8
-                    total_boost = sum(available_boost(step) for step in path)
-                    score = base_score + (total_boost / len(path))
-                    optimal_paths.append((path, score))
-        
-        # Path 2: Move around wheel first, then change letter
-        if source_num != dest_num:
             path = []
-            current_num = source_num
+            # Calculate distances
+            clockwise_distance = (end_num - start_num) % 12
+            counter_clockwise_distance = (start_num - end_num) % 12
             
-            # Calculate shortest distance around the wheel
-            clockwise_distance = (dest_num - current_num) % 12
-            counter_clockwise_distance = (current_num - dest_num) % 12
-            
+            # Choose shorter path (or clockwise if equal)
             if clockwise_distance <= counter_clockwise_distance:
                 # Move clockwise
-                while current_num != dest_num:
-                    current_num = (current_num % 12) + 1
-                    if current_num != dest_num:  # Don't include destination
-                        path.append(f"{current_num}{source_letter}")
+                current = start_num
+                while current != end_num:
+                    current = (current % 12) + 1
+                    if not exclude_endpoints or current != end_num:
+                        path.append(f"{current}{letter}")
             else:
-                # Move counter-clockwise  
-                while current_num != dest_num:
-                    current_num = ((current_num - 2) % 12) + 1
-                    if current_num != dest_num:  # Don't include destination
-                        path.append(f"{current_num}{source_letter}")
+                # Move counter-clockwise
+                current = start_num
+                while current != end_num:
+                    current = ((current - 2) % 12) + 1
+                    if not exclude_endpoints or current != end_num:
+                        path.append(f"{current}{letter}")
             
-            # Then switch letter if needed (but not if we're at destination number)
-            if source_letter != dest_letter and len(path) > 0:
-                # Add the letter change step at the destination number
-                path.append(f"{dest_num}{dest_letter}")
-            elif source_letter != dest_letter and len(path) == 0:
-                # Direct letter change at destination number
-                path.append(f"{dest_num}{dest_letter}")
-            
-            # Only add path if it has bridge steps and doesn't end with destination
-            if len(path) > 0:
-                # Remove destination from path if it got added
-                if path[-1] == c2:
-                    path = path[:-1]
-                
-                if len(path) > 0:  # Only add if there are still bridge steps
-                    base_score = 0.8
-                    total_boost = sum(available_boost(step) for step in path)
-                    score = base_score + (total_boost / len(path))
-                    optimal_paths.append((path, score))
+            return path
         
-        # Path 3: If same number, direct relative major/minor
+        # Case 1: Same number, different letter (relative major/minor)
         if source_num == dest_num and source_letter != dest_letter:
-            intermediate = f"{source_num}{dest_letter}"
-            score = 0.95 + available_boost(intermediate)
-            optimal_paths.append(([intermediate], score))
+            bridge = f"{source_num}{dest_letter}"
+            harmonic_paths.append([bridge])
         
-        # Path 4: Single-step neighbors (most harmonic single moves)
+        # Case 2: Different numbers, same letter (wheel movement only)
+        elif source_num != dest_num and source_letter == dest_letter:
+            wheel_path = create_wheel_path(source_num, dest_num, source_letter)
+            if wheel_path:
+                harmonic_paths.append(wheel_path)
+        
+        # Case 3: Different numbers and letters (two possible routes)
+        elif source_num != dest_num and source_letter != dest_letter:
+            
+            # Route 1: Change letter first, then move around wheel
+            route1 = [f"{source_num}{dest_letter}"]  # Relative major/minor
+            wheel_movement = create_wheel_path(source_num, dest_num, dest_letter)
+            route1.extend(wheel_movement)
+            harmonic_paths.append(route1)
+            
+            # Route 2: Move around wheel first, then change letter
+            wheel_movement = create_wheel_path(source_num, dest_num, source_letter)
+            if wheel_movement:
+                route2 = wheel_movement + [f"{dest_num}{dest_letter}"]
+                harmonic_paths.append(route2)
+            else:
+                # If no wheel movement needed, just the letter change
+                route2 = [f"{dest_num}{dest_letter}"]
+                harmonic_paths.append(route2)
+        
+        # Case 4: Add single-step harmonic neighbors as alternatives
         neighbors = self.camelot_neighbors(c1)
         for neighbor in neighbors:
-            if neighbor != c2:  # Don't include destination as bridge
-                # Check if this neighbor gets us closer harmonically to destination
-                neighbor_to_dest_score = self.camelot_score(neighbor, c2)
-                if neighbor_to_dest_score >= 0.6:  # Only if it's a good connection
-                    total_score = 0.85 + available_boost(neighbor)  # High score for direct neighbors
-                    optimal_paths.append(([neighbor], total_score))
+            if neighbor != c2:  # Don't include destination
+                # Only include if this neighbor harmonically connects to destination
+                if self.camelot_score(neighbor, c2) >= 0.6:
+                    harmonic_paths.append([neighbor])
         
-        # Remove duplicates and sort by score
-        seen_paths = set()
-        unique_paths = []
-        for path, score in optimal_paths:
-            path_key = tuple(path)
-            if path_key not in seen_paths:
-                seen_paths.add(path_key)
-                unique_paths.append((path, score))
-        
-        # Sort by score (highest first)
-        unique_paths.sort(key=lambda x: x[1], reverse=True)
-        
-        # Find the highest score and return only paths with that score (or very close)
-        if not unique_paths:
-            return []
-        
-        highest_score = unique_paths[0][1]
-        tolerance = 0.01
-        
+        # Format results
         results = []
-        for path, score in unique_paths:
-            if abs(score - highest_score) <= tolerance:
-                if len(path) == 1:
-                    formatted = f"{self.camelot_to_display(path[0])} (score: {score:.3f})"
-                else:
-                    path_display = " -> ".join(self.camelot_to_display(p) for p in path)
-                    formatted = f"{path_display} (score: {score:.3f})"
-                results.append(formatted)
+        seen_paths = set()
+        
+        for path in harmonic_paths:
+            if not path:  # Skip empty paths
+                continue
+                
+            path_key = tuple(path)
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            
+            if len(path) == 1:
+                marker = get_available_marker(path[0])
+                formatted = f"{self.camelot_to_display(path[0])}{marker}"
+            else:
+                path_parts = []
+                for step in path:
+                    marker = get_available_marker(step)
+                    path_parts.append(f"{self.camelot_to_display(step)}{marker}")
+                formatted = " -> ".join(path_parts)
+            
+            results.append(formatted)
         
         return results
     # Sequencing helpers (unchanged)
