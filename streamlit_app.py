@@ -1134,7 +1134,7 @@ with right_col:
 
 st.markdown("---")
 st.markdown(
-    "1.0.0 ",
-    "Thanks to songdata.io for playlist data.",
+    "1.0.0\n"
+    "Thanks to songdata.io for playlist data.\n"
     "Thanks to Mixed In Key for the Camelot system."
 )
