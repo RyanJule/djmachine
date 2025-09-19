@@ -536,7 +536,7 @@ class HarmonicSequencer:
     # Replace the suggest_bridge_keys method in your HarmonicSequencer class with this version:
 
     def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None,
-                        max_hops: int = 4, beam_width: int = 80) -> List[str]:
+                            max_hops: int = 4, beam_width: int = 80) -> List[str]:
         c1 = self.key_to_camelot(key1)
         c2 = self.key_to_camelot(key2)
         if available_keys:
@@ -641,29 +641,38 @@ class HarmonicSequencer:
 
         chain_results = find_chains()
 
-        # Combine all results with scores, properly sorted by harmonic quality
-        results: List[str] = []
+        # Combine ALL candidates with their scores, then sort by score regardless of path length
+        all_candidates: List[Tuple[str, float]] = []
         
-        # Add single-step bridges (best harmonic transitions first)
-        for cand, score in single_candidates[:6]:
+        # Collect single-step bridges
+        for cand, score in single_candidates:
             disp = self.camelot_to_display(cand)
-            formatted = f"{disp} (score: {score:.3f})"
-            if formatted not in results:
-                results.append(formatted)
+            formatted = f"{disp}"
+            all_candidates.append((formatted, score))
 
-        # Add two-step bridges (best harmonic flows first)
-        for (a, b), score in two_step[:6]:
+        # Collect two-step bridges
+        for (a, b), score in two_step:
             path_display = f"{self.camelot_to_display(a)} -> {self.camelot_to_display(b)}"
-            formatted = f"{path_display} (score: {score:.3f})"
-            if formatted not in results:
-                results.append(formatted)
+            all_candidates.append((path_display, score))
 
-        # Add multi-step bridges (smoothest harmonic flows first)
-        for path, score in chain_results[:6]:
+        # Collect multi-step bridges
+        for path, score in chain_results:
             path_display = " -> ".join(self.camelot_to_display(p) for p in path)
-            formatted = f"{path_display} (score: {score:.3f})"
-            if formatted not in results:
+            all_candidates.append((path_display, score))
+
+        # Sort ALL candidates by score (highest first), regardless of path length
+        all_candidates.sort(key=lambda x: x[1], reverse=True)
+        
+        # Format with scores and remove duplicates while preserving order
+        results: List[str] = []
+        seen_paths = set()
+        for path_display, score in all_candidates:
+            if path_display not in seen_paths:
+                formatted = f"{path_display} (score: {score:.3f})"
                 results.append(formatted)
+                seen_paths.add(path_display)
+                if len(results) >= 8:  # Limit to top 8 results
+                    break
 
         # Fallback if no good bridges found
         if not results:
@@ -676,7 +685,6 @@ class HarmonicSequencer:
                     results.append(formatted)
 
         return results[:8]
-
     # Sequencing helpers (unchanged)
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
         if not songs:
