@@ -892,7 +892,7 @@ with right_col:
                 a_disp = hs.camelot_to_display(a.camelot) if a.camelot else a.key
                 b_disp = hs.camelot_to_display(b.camelot) if b.camelot else b.key
                 st.subheader(f"{a.title} — {a_disp} → {b.title} — {b_disp}  (score {gb['score']:.2f})")
-                st.write("Bridge suggestions (single keys first, then sequences):")
+                st.write("Bridge suggestions:")
                 if gb['suggestions']:
                     for s in gb['suggestions']:
                         st.write(f"- {s}")
