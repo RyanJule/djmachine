@@ -639,8 +639,11 @@ class HarmonicSequencer:
         num = int(m.group(1))
         letter = m.group(2)
         other_letter = 'A' if letter == 'B' else 'B'
-        prev_num = num - 1 if num > 1 else 12
-        next_num = num + 1 if num < 12 else 1
+        
+        # Handle circular nature: 12 wraps to 1, 1 wraps to 12
+        prev_num = 12 if num == 1 else num - 1
+        next_num = 1 if num == 12 else num + 1
+        
         return [f"{num}{other_letter}", f"{prev_num}{letter}", f"{next_num}{letter}"]
 
     def camelot_score(self, c1: str, c2: str) -> float:
@@ -759,6 +762,12 @@ class HarmonicSequencer:
     # Sequencing helpers (unchanged)
     # Replace the create_harmonic_sequence method with this simple graph traversal:
 
+    # First, let's fix the camelot_neighbors function to properly handle the circular wheel:
+
+
+
+    # Now replace the create_harmonic_sequence method with this fixed version:
+
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
         if not songs:
             return []
@@ -772,7 +781,7 @@ class HarmonicSequencer:
         
         for song in songs:
             camelot = self.key_to_camelot(song.key)
-            if camelot:
+            if camelot and camelot in self.camelot_to_key:  # Only valid camelot codes
                 if camelot not in camelot_groups:
                     camelot_groups[camelot] = []
                 camelot_groups[camelot].append(song)
@@ -780,50 +789,55 @@ class HarmonicSequencer:
                 unkeyed_songs.append(song)
         
         if not camelot_groups:
-            # No valid keys detected, return original order
             return songs[:]
         
-        # Simple graph traversal: visit connected components
+        # Find the longest possible harmonic path through available keys
+        available_keys = set(camelot_groups.keys())
         sequence = []
-        visited_keys = set()
         
-        def get_unvisited_neighbors(camelot_code):
-            """Get harmonic neighbors that still have unvisited songs"""
-            neighbors = self.camelot_neighbors(camelot_code)
-            return [n for n in neighbors if n in camelot_groups and n not in visited_keys]
-        
-        def visit_key_group(camelot_code):
-            """Add all songs from this key group to sequence and mark as visited"""
-            if camelot_code in camelot_groups and camelot_code not in visited_keys:
-                sequence.extend(camelot_groups[camelot_code])
-                visited_keys.add(camelot_code)
-                return True
-            return False
-        
-        # Start with any key that has the most songs (natural starting point)
-        start_key = max(camelot_groups.keys(), key=lambda k: len(camelot_groups[k]))
-        current_key = start_key
-        visit_key_group(current_key)
-        
-        # Traverse the graph by always moving to connected neighbors
-        while len(visited_keys) < len(camelot_groups):
-            neighbors = get_unvisited_neighbors(current_key)
+        def find_harmonic_path():
+            """Find a path that visits as many connected keys as possible"""
+            best_path = []
             
-            if neighbors:
-                # Move to neighbor with most songs (prefer to clear larger groups)
-                next_key = max(neighbors, key=lambda k: len(camelot_groups[k]))
-                visit_key_group(next_key)
-                current_key = next_key
-            else:
-                # No connected neighbors left, jump to any remaining unvisited key
-                remaining_keys = [k for k in camelot_groups.keys() if k not in visited_keys]
-                if remaining_keys:
-                    # Choose remaining key with most songs
-                    next_key = max(remaining_keys, key=lambda k: len(camelot_groups[k]))
-                    visit_key_group(next_key)
-                    current_key = next_key
+            # Try starting from each available key
+            for start_key in available_keys:
+                current_path = [start_key]
+                visited = {start_key}
+                current = start_key
+                
+                # Extend path as far as possible using harmonic connections
+                while True:
+                    neighbors = [n for n in self.camelot_neighbors(current) 
+                            if n in available_keys and n not in visited]
+                    
+                    if not neighbors:
+                        break
+                    
+                    # Choose neighbor that extends the path furthest
+                    # (or just pick first one for simplicity)
+                    next_key = neighbors[0]
+                    current_path.append(next_key)
+                    visited.add(next_key)
+                    current = next_key
+                
+                if len(current_path) > len(best_path):
+                    best_path = current_path[:]
+            
+            return best_path
         
-        # Append any unkeyed songs at the end
+        # Find the best harmonic path
+        harmonic_path = find_harmonic_path()
+        
+        # Add songs following the harmonic path
+        for key in harmonic_path:
+            sequence.extend(camelot_groups[key])
+        
+        # Add any remaining keys not in the main path
+        remaining_keys = available_keys - set(harmonic_path)
+        for key in remaining_keys:
+            sequence.extend(camelot_groups[key])
+        
+        # Add unkeyed songs at the end
         sequence.extend(unkeyed_songs)
         
         return sequence
