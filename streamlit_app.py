@@ -753,7 +753,8 @@ with left_col:
         songdata_input = st.text_input("Spotify playlist URL or URI", placeholder="https://open.spotify.com/playlist/...")
         sd_timeout = st.number_input("SongData fetch timeout (seconds)", min_value=5, max_value=120, value=30, step=5)
         sd_debug = st.checkbox("Show SongData fetch debug info", value=False)
-        if st.button("Fetch SongData playlist"):
+        fetch_songdata_btn = st.button("Fetch SongData playlist", key="fetch_songdata_btn")  # unique key
+        if fetch_songdata_btn:
             pass  # handled below
 
     st.markdown("---")
