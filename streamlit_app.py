@@ -34,7 +34,149 @@ class Song:
 
 
 # -----------------------
-# SongData fetch helpers (fixed parser: header-aware)
+# Helpers for key detection
+# -----------------------
+CAMLEOT_REGEX = re.compile(r'\(?\s*(?:[1-9]|1[0-2])\s*[ABab]\s*\)?')
+CAMEL_NUMERIC_ONLY = re.compile(r'^\s*\d+(\.\d+)?\s*$')
+KEY_NAME_REGEX = re.compile(r'^[A-Ga-g](?:#|b)?m?$')
+KEY_NAME_IN_CELL = re.compile(r'[A-Ga-g](?:#|b)?(?:\s*(?:m|min|major|minor))?', re.I)
+
+
+def is_probable_camelot(cell: str) -> bool:
+    if not cell or str(cell).strip() == '':
+        return False
+    s = str(cell).strip()
+    # explicit Camelot like "8A", "(8B)", " 10 B "
+    if CAMLEOT_REGEX.search(s):
+        return True
+    # some exports might contain just the number 1..12 (we'll treat that as a candidate)
+    if CAMEL_NUMERIC_ONLY.match(s):
+        try:
+            num = float(s)
+            if 1 <= num <= 12:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def is_probable_keyname(cell: str) -> bool:
+    if not cell or str(cell).strip() == '':
+        return False
+    s = str(cell).strip()
+    # exact key name like "C", "C#", "C#m", "Dbm", "Am"
+    if KEY_NAME_REGEX.match(s):
+        return True
+    # "C (8B)" or "C / 8B" contains both
+    if '(' in s and CAMLEOT_REGEX.search(s) and KEY_NAME_IN_CELL.search(s):
+        return True
+    # textual forms: "C minor", "C major", "C# minor"
+    if re.search(r'^[A-Ga-g](?:#|b)?\s*(?:minor|major|min|maj)$', s, re.I):
+        return True
+    return False
+
+
+def detect_key_column_from_rows(rows: List[List[str]], headers: List[str]) -> Optional[int]:
+    """
+    Given the parsed rows (list-of-lists of cell strings) and headers,
+    return the best column index that looks like a 'key' or 'camelot' column.
+    """
+    if not rows:
+        return None
+    # determine max columns
+    ncols = max(len(r) for r in rows)
+    scores = [0.0] * ncols
+    counts = [0] * ncols
+
+    for r in rows:
+        for j in range(ncols):
+            cell = r[j] if j < len(r) else ""
+            if cell is None:
+                cell = ""
+            cell_str = str(cell).strip()
+            if cell_str == "":
+                continue
+            counts[j] += 1
+            if is_probable_camelot(cell_str) or is_probable_keyname(cell_str):
+                scores[j] += 1
+
+    # compute ratio
+    ratios = [(scores[i] / counts[i]) if counts[i] > 0 else 0.0 for i in range(ncols)]
+    # prefer header-based hint if present
+    header_hint_index = None
+    for i, h in enumerate(headers):
+        if 'camelot' in h.lower() or 'key' in h.lower():
+            header_hint_index = i
+            break
+
+    # choose candidate: either header hint if it looks reasonable, otherwise best ratio
+    best_idx = int(np.argmax(ratios))
+    best_ratio = ratios[best_idx]
+    # If header hint exists and has a non-zero ratio, prefer it
+    if header_hint_index is not None and header_hint_index < len(ratios) and ratios[header_hint_index] > 0:
+        return header_hint_index
+    # accept best_idx if ratio is > threshold (25% of non-empty rows)
+    if best_ratio >= 0.25:
+        return best_idx
+    # If none meets threshold but a header hint exists, return it anyway
+    if header_hint_index is not None:
+        return header_hint_index
+    return None
+
+
+def extract_key_and_camelot_from_cell(cell: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Given a cell possibly containing both a key and a Camelot (e.g. "C (8B)"), return (keyname, camelot_code).
+    Camelot code normalized to form '8A' / '8B' if found (letter upper).
+    """
+    if cell is None:
+        return None, None
+    s = str(cell).strip()
+    if not s:
+        return None, None
+    # Find Camelot code first
+    cam = None
+    m = CAMLEOT_REGEX.search(s)
+    if m:
+        code = m.group(0)
+        # normalize to '8A' format: remove parentheses/space, uppercase letter
+        digits = re.search(r'(?:[1-9]|1[0-2])', code)
+        letter = re.search(r'([ABab])', code)
+        if digits:
+            num = digits.group(0)
+            let = (letter.group(1).upper() if letter else 'A')
+            cam = f"{int(num)}{let}"
+    # Try numeric-only cell representing camelot number
+    if cam is None and CAMEL_NUMERIC_ONLY.match(s):
+        try:
+            num = int(float(s))
+            if 1 <= num <= 12:
+                # ambiguous whether A or B; leave as number (caller can try mappings) — but return as e.g. '8'
+                cam = str(num)
+        except Exception:
+            pass
+
+    # Find keyname (e.g., 'C#m', 'Dbm', 'Am', 'C')
+    keyname = None
+    # Check for clear key-only cell
+    if KEY_NAME_REGEX.match(s):
+        keyname = s
+    else:
+        # search for token that looks like key name
+        m2 = KEY_NAME_IN_CELL.search(s)
+        if m2:
+            token = m2.group(0).strip()
+            # normalize minor/major tokens
+            keyname = token
+    if keyname:
+        # normalize spacing/casing like "c#" -> "C#"
+        keyname = keyname.replace(' ', '')
+        keyname = keyname[0].upper() + keyname[1:]
+    return keyname, cam
+
+
+# -----------------------
+# SongData fetch helpers (fixed parser: header-aware + content detection)
 # -----------------------
 def extract_spotify_playlist_id(spotify_url: str) -> Optional[str]:
     """Extract the playlist id from several Spotify URL/URI formats."""
@@ -49,7 +191,7 @@ def extract_spotify_playlist_id(spotify_url: str) -> Optional[str]:
     m = re.search(r'spotify:playlist:([A-Za-z0-9]+)', s)
     if m:
         return m.group(1)
-    # maybe user pasted just the id
+    # maybe just the id
     if re.fullmatch(r'[A-Za-z0-9]+', s):
         return s
     return None
@@ -61,7 +203,6 @@ def fetch_songdata_playlist(spotify_url: str,
     """
     Fetch SongData playlist for a spotify playlist id/url.
     Returns: (list_of_Song, songdata_url, debug_info)
-    Raises RuntimeError on parse/fetch failure.
     debug_info contains headers_found and sample_rows when debug=True.
     """
     pid = extract_spotify_playlist_id(spotify_url)
@@ -80,89 +221,130 @@ def fetch_songdata_playlist(spotify_url: str,
     soup = BeautifulSoup(r.text, 'html.parser')
     tables = soup.find_all('table')
     songs: List[Song] = []
-    debug_info = {'headers_seen': [], 'first_rows': []}
+    debug_info = {'headers_seen': [], 'first_rows': [], 'chosen_key_column': None}
 
     # Heuristic: find the first table that contains Title & Artist columns
     for table in tables:
-        headers = []
+        headers: List[str] = []
         thead = table.find('thead')
         if thead:
-            headers = [th.get_text(strip=True).lower() for th in thead.find_all('th')]
+            headers = [th.get_text(strip=True) for th in thead.find_all('th')]
         else:
-            # try first row as header fallback
             first_row = table.find('tr')
             if first_row:
-                headers = [td.get_text(strip=True).lower() for td in first_row.find_all(['th', 'td'])]
+                headers = [td.get_text(strip=True) for td in first_row.find_all(['th', 'td'])]
         headers = [h.strip() for h in headers if h.strip()]
         if not headers:
             continue
 
         debug_info['headers_seen'].append(headers)
 
-        # Check for presence of song/title and artist columns
-        has_title = any('title' in h or 'song' in h or 'track' in h for h in headers)
-        has_artist = any('artist' in h for h in headers)
+        # Lowercase headers for detection
+        lheaders = [h.lower() for h in headers]
+        has_title = any('title' in h or 'song' in h or 'track' in h for h in lheaders)
+        has_artist = any('artist' in h for h in lheaders)
         if not (has_title and has_artist):
             continue
 
-        # Build header map to required fields (title, artist, key, tempo)
+        # Build row grid
+        tbody = table.find('tbody') or table
+        rows_html = tbody.find_all('tr')
+        rows_cells: List[List[str]] = []
+        sample_rows = []
+
+        for row in rows_html:
+            cols = row.find_all(['td', 'th'])
+            cell_texts = [c.get_text(strip=True) for c in cols]
+            # normalize the cell texts (convert empty to "")
+            cell_texts = [t if t is not None else "" for t in cell_texts]
+            rows_cells.append(cell_texts)
+            if len(sample_rows) < 6:
+                sample_rows.append(cell_texts)
+
+        debug_info['first_rows'] = sample_rows
+
+        # detect key column index using content heuristics
+        key_col_idx = detect_key_column_from_rows(rows_cells, headers)
+        debug_info['chosen_key_column'] = key_col_idx
+
+        # Map header indices by name for title/artist/tempo
         header_map: Dict[str, int] = {}
-        for idx, h in enumerate(headers):
+        for idx, h in enumerate(lheaders):
             if any(k in h for k in ("title", "song", "track")) and 'title' not in header_map:
                 header_map['title'] = idx
             elif 'artist' in h and 'artist' not in header_map:
                 header_map['artist'] = idx
-            elif ('key' in h or 'camelot' in h) and 'key' not in header_map:
-                header_map['key'] = idx
             elif ('bpm' in h or 'tempo' in h) and 'tempo' not in header_map:
                 header_map['tempo'] = idx
-            # ignore columns like 'added', 'duration', 'time', etc.
+            # we intentionally DO NOT put 'key' here if we want to rely on the detected index
 
-        # Parse rows - robustly handle missing columns
-        tbody = table.find('tbody') or table
-        rows = tbody.find_all('tr')
-        sample_rows = []
-        for row in rows:
-            cols = row.find_all(['td', 'th'])
-            if not cols:
-                continue
-
+        # Now build Song objects using the detected key column (preferency: detected index -> header_map 'key' if present -> none)
+        for row in rows_cells:
+            # safe access helpers
             def get_cell(i: int) -> str:
                 try:
-                    return cols[i].get_text(strip=True)
+                    return row[i]
                 except Exception:
                     return ""
 
-            title = get_cell(header_map.get('title', -1)) if 'title' in header_map else ""
-            artist = get_cell(header_map.get('artist', -1)) if 'artist' in header_map else ""
-            key = get_cell(header_map.get('key', -1)) if 'key' in header_map else ""
-            tempo_txt = get_cell(header_map.get('tempo', -1)) if 'tempo' in header_map else ""
+            title = get_cell(header_map['title']) if 'title' in header_map and header_map['title'] < len(row) else ""
+            artist = get_cell(header_map['artist']) if 'artist' in header_map and header_map['artist'] < len(row) else ""
+            tempo_txt = get_cell(header_map['tempo']) if 'tempo' in header_map and header_map['tempo'] < len(row) else ""
             tempo = None
             if tempo_txt:
                 m = re.search(r'(\d{2,3})', tempo_txt)
                 if m:
                     tempo = int(m.group(1))
 
-            # Only append rows with at least a title or artist
-            if title or artist:
-                songs.append(Song(title=title, artist=artist, key=key, tempo=tempo))
-            # collect a small sample for debugging
-            if len(sample_rows) < 6:
-                sample_rows.append([get_cell(i) for i in range(min(len(cols), 8))])
+            key_val = ""
+            camelot_val = None
 
-        debug_info['first_rows'] = sample_rows
+            # priority 1: detected key column
+            if key_col_idx is not None and key_col_idx < len(row):
+                possible = get_cell(key_col_idx)
+                # try to extract both keyname and camelot from the same cell
+                kn, cam = extract_key_and_camelot_from_cell(possible)
+                if kn:
+                    key_val = kn
+                if cam:
+                    camelot_val = cam
+
+            # priority 2: header explicitly named 'key'/'camelot'
+            if (not key_val or key_val == ""):
+                for idx, h in enumerate(lheaders):
+                    if ('key' in h or 'camelot' in h) and idx < len(row):
+                        possible = get_cell(idx)
+                        kn, cam = extract_key_and_camelot_from_cell(possible)
+                        if kn and not key_val:
+                            key_val = kn
+                        if cam and not camelot_val:
+                            camelot_val = cam
+
+            # fallback: try to parse any column for key-like content (first match)
+            if not key_val and not camelot_val:
+                for idx in range(len(row)):
+                    possible = get_cell(idx)
+                    kn, cam = extract_key_and_camelot_from_cell(possible)
+                    if kn and not key_val:
+                        key_val = kn
+                    if cam and not camelot_val:
+                        camelot_val = cam
+                    if key_val or camelot_val:
+                        break
+
+            # Final fallback: leave key empty
+            songs.append(Song(title=title, artist=artist, key=key_val or "", tempo=tempo))
 
         if songs:
             break  # stop after first plausible table
 
-    # If not found, attempt to find JSON-embedded track list inside script tags (best-effort)
+    # If not found, attempt to find JSON-embedded track list inside script tags
     if not songs:
         scripts = soup.find_all('script')
         for sc in scripts:
             text = sc.string or ""
             if not text:
                 continue
-            # naive JSON array extraction for 'tracks' or similar arrays
             m = re.search(r'(?:"tracks"|\'tracks\'|tracks)\s*:\s*(\[[^\]]+\])', text, re.IGNORECASE | re.DOTALL)
             if m:
                 arr_text = m.group(1)
@@ -301,14 +483,27 @@ class HarmonicSequencer:
             return self.alias_to_camelot[cleaned[:-1]]
         if (cleaned + 'm') in self.alias_to_camelot:
             return self.alias_to_camelot[cleaned + 'm']
+        # if input is numeric-only 1..12, return number as-is (caller may use adjacent scanning)
+        if CAMEL_NUMERIC_ONLY.match(cleaned):
+            try:
+                num = int(float(cleaned))
+                if 1 <= num <= 12:
+                    return str(num)
+            except Exception:
+                pass
         return None
 
     def camelot_to_display(self, camelot_code: str) -> str:
+        # if code is numeric string like '11' we can't know A/B; display number
+        if camelot_code is None:
+            return "(unknown)"
+        if str(camelot_code).isdigit():
+            return f"{camelot_code} (unknown A/B)"
         name = self.camelot_to_key.get(camelot_code, camelot_code)
         return f"{name} ({camelot_code})"
 
     def camelot_neighbors(self, code: str) -> List[str]:
-        if code not in self.camelot_to_key:
+        if not code or code not in self.camelot_to_key:
             return []
         m = re.match(r'(\d+)([AB])', code)
         if not m:
@@ -328,13 +523,21 @@ class HarmonicSequencer:
             return 0.2
         if c1 == c2:
             return 1.0
+        # if either code is numeric-only (ambiguous A/B), be conservative
+        if str(c1).isdigit() or str(c2).isdigit():
+            # if both numeric and equal, moderate
+            try:
+                if int(float(c1)) == int(float(c2)):
+                    return 0.6
+            except Exception:
+                pass
+            return 0.3
         if c1 not in self.camelot_to_key or c2 not in self.camelot_to_key:
             return 0.2
         n1, l1 = int(re.match(r'(\d+)', c1).group(1)), c1[-1]
         n2, l2 = int(re.match(r'(\d+)', c2).group(1)), c2[-1]
         if n1 == n2 and l1 != l2:
             return 0.95
-        # circular numeric distance
         diff = min((n1 - n2) % 12, (n2 - n1) % 12)
         if diff == 1:
             return 0.8 if l1 == l2 else 0.6
@@ -353,11 +556,6 @@ class HarmonicSequencer:
     # ------------------------------------------------------------------
     def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None,
                             max_hops: int = 4, beam_width: int = 80) -> List[str]:
-        """
-        Suggest keys or key sequences to bridge key1 -> key2.
-        Returns human readable display strings (e.g. "Am (8A)" or "G#m (1A) -> D#m (2A)").
-        If available_keys provided, prefers chains that use those (useful when mixing through existing set).
-        """
         c1 = self.key_to_camelot(key1)
         c2 = self.key_to_camelot(key2)
         if available_keys:
@@ -366,7 +564,7 @@ class HarmonicSequencer:
         else:
             available_camelot = []
 
-        # if mapping missing, be permissive and return neighbors of the known one
+        # if mapping missing, try to be permissive and return neighbors of the known one
         if not c1 or not c2:
             known = c1 or c2
             if known:
@@ -430,11 +628,9 @@ class HarmonicSequencer:
                         new_score = score + edge + boost_for_available(cand)
                         new_path = path + [cand]
                         if cand == c2:
-                            # store intermediate nodes (exclude starting key)
                             results.append((new_path[1:], new_score))
                         else:
                             new_beams.append((new_path, new_score))
-                # prune beams
                 beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_width_local]
             results.sort(key=lambda x: x[1], reverse=True)
             return results
@@ -472,9 +668,6 @@ class HarmonicSequencer:
     # Sequencing helpers
     # -----------------------
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
-        """
-        Greedy nearest neighbor sequence to minimize harmonic jumps.
-        """
         if not songs:
             return []
         remaining = songs[:]
@@ -520,10 +713,6 @@ class HarmonicSequencer:
 # BPM fetch helper (best-effort)
 # -----------------------
 def fetch_bpm_from_web(title: str, artist: str, timeout: float = 5.0) -> Optional[int]:
-    """
-    Lightweight attempt to fetch BPM from a web search result snippet.
-    Best-effort and unreliable; used as fallback when tempo missing.
-    """
     try:
         q = f"{title} {artist} bpm"
         url = f"https://www.google.com/search?q={requests.utils.quote(q)}"
@@ -546,7 +735,7 @@ def fetch_bpm_from_web(title: str, artist: str, timeout: float = 5.0) -> Optiona
 st.title("Harmonic Song Analyzer 🎧 — Camelot + SongData")
 st.markdown("Analyze playlists, build harmonic play orders, and get bridge-key suggestions (Camelot system).")
 
-# Layout: left column for inputs/options, right for results
+# Layout
 left_col, right_col = st.columns([1, 2])
 
 with left_col:
@@ -554,7 +743,7 @@ with left_col:
     input_mode = st.radio("Choose input method", ["Upload CSV / Paste", "Fetch from Spotify → SongData"])
     uploaded_file = None
     pasted_text = ""
-    songdata_url_input = ""
+    songdata_input = ""
     sd_timeout = 30.0
     sd_debug = False
     if input_mode == "Upload CSV / Paste":
@@ -565,7 +754,7 @@ with left_col:
         sd_timeout = st.number_input("SongData fetch timeout (seconds)", min_value=5, max_value=120, value=30, step=5)
         sd_debug = st.checkbox("Show SongData fetch debug info", value=False)
         if st.button("Fetch SongData playlist"):
-            songdata_url_input = songdata_input.strip()
+            pass  # handled below
 
     st.markdown("---")
     st.header("Options")
@@ -578,31 +767,53 @@ with left_col:
 
     st.markdown("---")
     st.header("Export / Save")
-    if st.button("Export recommended order as CSV"):
-        # placeholder — we'll generate later if songs present
-        st.info("Export will appear in results pane after analysis.")
+    # export handled in right pane
 
-
-# Load songs from inputs
+# Load songs
 songs: List[Song] = []
 
-# 1) Upload
+# 1) Uploaded CSV
 if uploaded_file:
     try:
         df = pd.read_csv(uploaded_file)
+        # detect key column in uploaded df using heuristics
+        def detect_key_col_in_df(df: pd.DataFrame) -> Optional[str]:
+            cols = list(df.columns)
+            rows = df.fillna("").astype(str).values.tolist()
+            idx = detect_key_column_from_rows(rows, cols)
+            if idx is not None and idx < len(cols):
+                return cols[idx]
+            # fallback to common header names
+            for candidate in ['key', 'camelot', 'Input Key', 'Key', 'Camelot']:
+                if candidate in df.columns:
+                    return candidate
+            # try columns whose values look like keynames
+            for c in cols:
+                series = df[c].astype(str)
+                matches = series.apply(lambda x: is_probable_camelot(x) or is_probable_keyname(x)).sum()
+                nonempty = (series.str.strip() != "").sum()
+                if nonempty > 0 and (matches / nonempty) > 0.25:
+                    return c
+            return None
+
+        key_col = detect_key_col_in_df(df)
         for _, r in df.iterrows():
             title = str(r.get('title') or r.get('Title') or r.get('song') or r.get('Song') or "")
             artist = str(r.get('artist') or r.get('Artist') or "")
-            key = str(r.get('key') or r.get('Key') or "")
-            tempo = r.get('tempo') if 'tempo' in r else None
+            if key_col:
+                key = str(r.get(key_col) or "")
+            else:
+                key = str(r.get('key') or r.get('Key') or r.get('Input Key') or "")
+            tempo = None
+            if 'tempo' in r and pd.notna(r.get('tempo')):
+                tempo = r.get('tempo')
             songs.append(Song(title=title, artist=artist, key=key, tempo=tempo))
         st.success(f"Loaded {len(songs)} songs from uploaded CSV")
     except Exception as e:
         st.error(f"Could not read uploaded CSV: {e}")
 
-# 2) Paste
+# 2) Pasted text
 if pasted_text and not songs:
-    # attempt to parse as CSV-like first
     sio = StringIO(pasted_text)
     try:
         df = pd.read_csv(sio, header=None)
@@ -613,7 +824,6 @@ if pasted_text and not songs:
                 songs.append(Song(title=parts[0], artist=parts[1], key=parts[2], tempo=tempo))
         st.success(f"Parsed {len(songs)} songs from pasted CSV/text")
     except Exception:
-        # fallback: line-by-line parsing
         lines = [l.strip() for l in pasted_text.splitlines() if l.strip()]
         for line in lines:
             parts = [p.strip() for p in re.split(r',|\t|;', line) if p.strip()]
@@ -623,38 +833,41 @@ if pasted_text and not songs:
         if songs:
             st.success(f"Parsed {len(songs)} songs from pasted text")
 
-# 3) Fetch from SongData (via Spotify playlist id)
-if songdata_url_input:
-    try:
-        with st.spinner("Fetching SongData playlist (this can take a while)..."):
-            fetched_songs, sd_url, debug_info = fetch_songdata_playlist(songdata_url_input, timeout=sd_timeout, debug=sd_debug)
-            songs = fetched_songs
-            st.success(f"Fetched {len(songs)} songs from SongData")
-            st.markdown(f"[Open SongData playlist page]({sd_url})")
-            if sd_debug:
-                st.subheader("SongData debug info")
-                st.write("Detected table headers (first few):")
-                st.write(debug_info.get('headers_seen', []))
-                st.write("Sample parsed rows (first few):")
-                st.write(debug_info.get('first_rows', []))
-    except Exception as e:
-        st.error(f"Failed to fetch/parse SongData playlist: {e}")
-        # offer direct SongData link if we could parse an ID
-        pid = extract_spotify_playlist_id(songdata_url_input)
-        if pid:
-            st.markdown(f"Try opening the SongData page directly: https://songdata.io/playlist/{pid}")
+# 3) Fetch from SongData
+if input_mode == "Fetch from Spotify → SongData" and st.button("Fetch SongData playlist"):
+    if not songdata_input:
+        st.error("Please enter a Spotify playlist URL or URI first.")
+    else:
+        with st.spinner("Fetching SongData playlist (may take some time)..."):
+            try:
+                fetched_songs, sd_url, debug_info = fetch_songdata_playlist(songdata_input, timeout=sd_timeout, debug=sd_debug)
+                songs = fetched_songs
+                st.success(f"Fetched {len(songs)} songs from SongData")
+                st.markdown(f"[Open SongData playlist page]({sd_url})")
+                if sd_debug:
+                    st.subheader("SongData debug info")
+                    st.write("Detected table headers (first few):")
+                    st.write(debug_info.get('headers_seen', []))
+                    st.write("Sample parsed rows (first few):")
+                    st.write(debug_info.get('first_rows', []))
+                    st.write("Chosen key column index:", debug_info.get('chosen_key_column'))
+            except Exception as e:
+                st.error(f"Failed to fetch/parse SongData playlist: {e}")
+                pid = extract_spotify_playlist_id(songdata_input)
+                if pid:
+                    st.markdown(f"Try opening the SongData page directly: https://songdata.io/playlist/{pid}")
 
-# Right column: results and analysis
+# Right column: results
 with right_col:
     if songs:
         hs = HarmonicSequencer()
-        # optionally shuffle input songs
+        # optional shuffle
         if shuffle_flag:
             np.random.shuffle(songs)
 
-        # attempt to fetch missing tempos if user opted in
+        # fetch BPM if requested
         if auto_bpm:
-            with st.spinner("Fetching missing BPMs (best-effort, may be slow)..."):
+            with st.spinner("Fetching missing BPMs (best-effort)..."):
                 for s in songs:
                     if s.tempo is None or (isinstance(s.tempo, float) and np.isnan(s.tempo)):
                         bpm = fetch_bpm_from_web(s.title, s.artist)
@@ -662,45 +875,32 @@ with right_col:
                             s.tempo = bpm
                         time.sleep(0.15)
 
-        # Analyze
         analysis = hs.analyze_song_collection(songs, available_keys=[s.key for s in songs])
         sequence = analysis['sequence']
-        mixing_pairs = analysis['mixing_pairs']
-        gaps_and_bridges = analysis['gaps_and_bridges']
+        pairs = analysis['mixing_pairs']
+        gaps = analysis['gaps_and_bridges']
 
-        # Display Recommended Play Order
         st.header("Recommended Play Order")
         order_rows = []
         for i, s in enumerate(sequence):
             camelot_display = hs.camelot_to_display(s.camelot) if s.camelot else "(unknown)"
-            order_rows.append({
-                'Order': i + 1,
-                'Title': s.title,
-                'Artist': s.artist,
-                'Input Key': s.key,
-                'Camelot': camelot_display,
-                'Tempo': s.tempo or ''
-            })
+            order_rows.append({'Order': i + 1, 'Title': s.title, 'Artist': s.artist, 'Input Key': s.key, 'Camelot': camelot_display, 'Tempo': s.tempo or ''})
         df_order = pd.DataFrame(order_rows)
         st.dataframe(df_order)
-
-        # Export CSV button
         csv_bytes = df_order.to_csv(index=False).encode('utf-8')
         st.download_button("Download recommended order (CSV)", data=csv_bytes, file_name="recommended_order.csv", mime="text/csv")
 
-        # Mixing pair scores
         st.header("Mixing Pair Scores (Camelot-based)")
         mp_rows = []
-        for a, b, score in mixing_pairs:
+        for a, b, score in pairs:
             a_disp = hs.camelot_to_display(a.camelot) if a.camelot else "(unknown)"
             b_disp = hs.camelot_to_display(b.camelot) if b.camelot else "(unknown)"
             mp_rows.append({'From': f"{a.title} — {a.artist} {a_disp}", 'To': f"{b.title} — {b.artist} {b_disp}", 'Score': round(score, 2)})
         st.table(pd.DataFrame(mp_rows))
 
-        # Gaps and bridge suggestions
-        if gaps_and_bridges:
+        if gaps:
             st.header("Harmonic Gaps & Bridge Suggestions")
-            for gb in gaps_and_bridges:
+            for gb in gaps:
                 a = gb['from']
                 b = gb['to']
                 a_disp = hs.camelot_to_display(a.camelot) if a.camelot else a.key
@@ -716,28 +916,20 @@ with right_col:
         else:
             st.success("No major harmonic gaps detected — your order flows well!")
 
-        # Debug / Inspect mapping table
         if show_normalized:
             st.header("Normalized Keys / Camelot Codes")
             mapping_rows = []
             for s in sequence:
-                mapping_rows.append({
-                    'Title': s.title,
-                    'Artist': s.artist,
-                    'Input Key': s.key,
-                    'Camelot': s.camelot or '',
-                    'Camelot Display': hs.camelot_to_display(s.camelot) if s.camelot else ''
-                })
+                mapping_rows.append({'Title': s.title, 'Artist': s.artist, 'Input Key': s.key, 'Camelot': s.camelot or '', 'Camelot Display': hs.camelot_to_display(s.camelot) if s.camelot else ''})
             st.dataframe(pd.DataFrame(mapping_rows))
 
     else:
-        st.info("No songs loaded yet. Upload a CSV, paste songs, or fetch a SongData playlist from Spotify in the left panel.")
+        st.info("No songs loaded yet. Upload a CSV, paste songs, or fetch a SongData playlist from Spotify using the left panel.")
 
 
 # Footer
 st.markdown("---")
 st.markdown(
-    "Built with ❤️ — Harmonic suggestions use the **Camelot** system and attempt to parse SongData playlist pages robustly. "
-    "SongData parsing is best-effort: if a page renders its main table with client-side JavaScript, the server-side HTML may not contain the table and parsing will fail. "
-    "If parsing fails, try opening the SongData page and exporting CSV (if available), or increase the fetch timeout in the sidebar."
+    "Built with ❤️ — Harmonic suggestions use the **Camelot** system and the SongData parser now tries to detect which column actually contains keys. "
+    "If a page uses client-side rendering (JS) to build the table, the server-side HTML may not contain the table — in that case try exporting CSV from SongData or increase the fetch timeout."
 )
