@@ -835,7 +835,7 @@ if pasted_text and not songs:
             st.success(f"Parsed {len(songs)} songs from pasted text")
 
 # 3) Fetch from SongData
-if input_mode == "Fetch from Spotify → SongData" and st.button("Fetch SongData playlist"):
+if input_mode == "Fetch from Spotify → SongData" and fetch_songdata_btn:
     if not songdata_input:
         st.error("Please enter a Spotify playlist URL or URI first.")
     else:
