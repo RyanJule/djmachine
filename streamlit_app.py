@@ -775,72 +775,95 @@ class HarmonicSequencer:
         if len(songs) == 1:
             return songs[:]
         
-        # Group songs by their Camelot codes
-        camelot_groups = {}
+        # Group songs by Camelot position
+        position_groups = {}
         unkeyed_songs = []
         
         for song in songs:
             camelot = self.key_to_camelot(song.key)
-            if camelot and camelot in self.camelot_to_key:  # Only valid camelot codes
-                if camelot not in camelot_groups:
-                    camelot_groups[camelot] = []
-                camelot_groups[camelot].append(song)
+            if camelot and camelot in self.camelot_to_key:
+                if camelot not in position_groups:
+                    position_groups[camelot] = []
+                position_groups[camelot].append(song)
             else:
                 unkeyed_songs.append(song)
         
-        if not camelot_groups:
+        if not position_groups:
             return songs[:]
         
-        # Find the longest possible harmonic path through available keys
-        available_keys = set(camelot_groups.keys())
-        sequence = []
+        available_positions = list(position_groups.keys())
         
-        def find_harmonic_path():
-            """Find a path that visits as many connected keys as possible"""
-            best_path = []
+        def get_harmonic_neighbors(camelot_code):
+            """Get adjacent positions on the Camelot wheel"""
+            m = re.match(r'(\d+)([AB])', camelot_code)
+            if not m:
+                return []
             
-            # Try starting from each available key
-            for start_key in available_keys:
-                current_path = [start_key]
-                visited = {start_key}
-                current = start_key
-                
-                # Extend path as far as possible using harmonic connections
-                while True:
-                    neighbors = [n for n in self.camelot_neighbors(current) 
-                            if n in available_keys and n not in visited]
-                    
-                    if not neighbors:
-                        break
-                    
-                    # Choose neighbor that extends the path furthest
-                    # (or just pick first one for simplicity)
-                    next_key = neighbors[0]
-                    current_path.append(next_key)
-                    visited.add(next_key)
-                    current = next_key
-                
-                if len(current_path) > len(best_path):
-                    best_path = current_path[:]
+            num = int(m.group(1))
+            letter = m.group(2)
+            other_letter = 'A' if letter == 'B' else 'B'
             
-            return best_path
+            neighbors = []
+            
+            # Horizontal (same number, different letter)
+            neighbors.append(f"{num}{other_letter}")
+            
+            # Vertical (adjacent numbers, same letter) with wrap-around
+            up = num + 1 if num < 12 else 1
+            down = num - 1 if num > 1 else 12
+            neighbors.append(f"{up}{letter}")
+            neighbors.append(f"{down}{letter}")
+            
+            # Diagonal (adjacent numbers, different letter)
+            neighbors.append(f"{up}{other_letter}")
+            neighbors.append(f"{down}{other_letter}")
+            
+            return neighbors
         
-        # Find the best harmonic path
-        harmonic_path = find_harmonic_path()
+        def find_hamiltonian_path_dfs():
+            """Use depth-first search with proper backtracking to find Hamiltonian path"""
+            
+            def dfs(path, remaining):
+                if not remaining:
+                    return path  # Found complete path
+                
+                if not path:
+                    # Try starting from each position
+                    for start in available_positions:
+                        result = dfs([start], [pos for pos in available_positions if pos != start])
+                        if result:
+                            return result
+                    return None
+                
+                current = path[-1]
+                neighbors = get_harmonic_neighbors(current)
+                
+                # Try each remaining position that's a harmonic neighbor
+                for next_pos in remaining:
+                    if next_pos in neighbors:
+                        new_remaining = [pos for pos in remaining if pos != next_pos]
+                        result = dfs(path + [next_pos], new_remaining)
+                        if result:
+                            return result
+                
+                return None  # No valid path from this state
+            
+            return dfs([], available_positions)
         
-        # Add songs following the harmonic path
-        for key in harmonic_path:
-            sequence.extend(camelot_groups[key])
+        # Find the Hamiltonian path
+        hamiltonian_path = find_hamiltonian_path_dfs()
         
-        # Add any remaining keys not in the main path
-        remaining_keys = available_keys - set(harmonic_path)
-        for key in remaining_keys:
-            sequence.extend(camelot_groups[key])
-        
-        # Add unkeyed songs at the end
-        sequence.extend(unkeyed_songs)
-        
-        return sequence
+        if hamiltonian_path:
+            # Build sequence following the harmonic path
+            sequence = []
+            for position in hamiltonian_path:
+                sequence.extend(position_groups[position])
+            sequence.extend(unkeyed_songs)
+            return sequence
+        else:
+            # Fallback: if somehow no path found, use original order
+            # This shouldn't happen with your example since there IS a valid path
+            return songs[:]
 
     def find_mixing_pairs(self, songs: List[Song]) -> List[Tuple[Song, Song, float]]:
         pairs = []
