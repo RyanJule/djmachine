@@ -917,8 +917,8 @@ def fetch_bpm_from_web(title: str, artist: str, timeout: float = 5.0) -> Optiona
 # -----------------------
 # ...existing code...
 
-st.title("Harmonic Song Analyzer 🎧 — Camelot + SongData")
-st.markdown("Analyze playlists, build harmonic play orders, and get bridge-key suggestions (Camelot system).")
+st.title("Harmonic Song Analyzer - Leverages songdata.io and Camelot System for Harmonic Mixing")
+st.markdown("Paste the share link for your spotify playlist in order to build a harmonic play order, and get bridge-key suggestions.")
 
 left_col, right_col = st.columns([1, 2])
 
@@ -1134,6 +1134,7 @@ with right_col:
 
 st.markdown("---")
 st.markdown(
-    "Built with ❤️ — This version improves SongData parsing: it prefers an explicit 'Camelot' header, "
-    "correctly parses 10/11/12 Camelot codes, and composes a readable 'Key (Camelot)' display for each song."
+    "1.0.0 "
+    "Thanks to songdata.io for playlist data."
+    "Thanks to Mixed In Key for the Camelot system."
 )
