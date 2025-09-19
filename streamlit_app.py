@@ -39,8 +39,8 @@ class Song:
 # NOTE: order matters: match 10-12 before single digits.
 CAMLEOT_REGEX = re.compile(r'\(?\s*(?:1[0-2]|[1-9])\s*[ABab]\s*\)?')
 CAMEL_NUMERIC_ONLY = re.compile(r'^\s*\d+(\.\d+)?\s*$')
-KEY_NAME_REGEX = re.compile(r'^[A-Ga-g](?:#|b)?m?$') #contains the word 
-KEY_NAME_IN_CELL = re.compile(r'[A-Ga-g](?:#|b)?(?:\s*(?:major|minor))?', re.I)
+KEY_NAME_REGEX = re.compile(r'^[A-Ga-g](?:[#♯]|[b♭])?m?$')
+KEY_NAME_IN_CELL = re.compile(r'[A-Ga-g](?:[#♯]|[b♭])?\s*(?:major|minor|Major|Minor)?', re.I)
 
 
 def is_probable_camelot(cell: str) -> bool:
@@ -63,7 +63,8 @@ def is_probable_keyname(cell: str) -> bool:
     if not cell or str(cell).strip() == '':
         return False
     s = str(cell).strip()
-    if re.search(r'^[A-Ga-g](?:#|b)?\s*(?:minor|major)$', s, re.I):
+    # More comprehensive key name detection including Unicode symbols
+    if re.search(r'^[A-Ga-g](?:[#♯]|[b♭])?\s*(?:minor|major|Minor|Major)?$', s, re.I):
         return True
     return False
 
@@ -104,13 +105,10 @@ def detect_key_column_from_rows(rows: List[List[str]], headers: List[str]) -> Op
     # final fallback: None
     return None
 
-
 def extract_key_and_camelot_from_cell(cell: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Given a cell possibly containing both a key and a Camelot code (e.g. 'C (8B)' or '8A'),
     return (keyname, camelot_code).
-    Camelot normalized to e.g. '8A' or '11B'. If the cell contains only a raw number '11'
-    we return camelot as '11' (caller may combine with detected keyname).
     """
     if cell is None:
         return None, None
@@ -118,7 +116,10 @@ def extract_key_and_camelot_from_cell(cell: str) -> Tuple[Optional[str], Optiona
     if not s:
         return None, None
 
-    # find Camelot token (prefer full e.g. '10B', '11A', '8A', '(8B)')
+    # Handle Unicode musical symbols
+    s = s.replace('♭', 'b').replace('♯', '#')
+
+    # Find Camelot token first (prefer full e.g. '10B', '11A', '8A', '(8B)')
     cam = None
     m = CAMLEOT_REGEX.search(s)
     if m:
@@ -130,7 +131,7 @@ def extract_key_and_camelot_from_cell(cell: str) -> Tuple[Optional[str], Optiona
             let = (letter.group(1).upper() if letter else 'A')
             cam = f"{int(num)}{let}"
 
-    # numeric only cell (like '11') -> return '11' (ambiguous A/B)
+    # Numeric-only cell (like '11') -> return '11' (ambiguous A/B)
     if cam is None and CAMEL_NUMERIC_ONLY.match(s):
         try:
             num = int(float(s))
@@ -139,19 +140,36 @@ def extract_key_and_camelot_from_cell(cell: str) -> Tuple[Optional[str], Optiona
         except Exception:
             pass
 
-    # find keyname token like 'C', 'C#', 'C#m', 'Dbm', 'Am'
+    # Find keyname token - improved pattern to handle flats/sharps and major/minor
     keyname = None
-    if KEY_NAME_REGEX.match(s):
+    
+    # First try: exact match for the whole string
+    if re.match(r'^[A-Ga-g](?:[#b])?(?:\s*(?:major|minor|Major|Minor))?$', s, re.I):
         keyname = s
     else:
-        m2 = KEY_NAME_IN_CELL.search(s)
-        if m2:
-            token = m2.group(0).strip()
-            keyname = token
+        # Second try: search within the string for key pattern
+        key_pattern = re.search(r'([A-Ga-g])([#b]?)\s*(major|minor|Major|Minor)?', s, re.I)
+        if key_pattern:
+            note = key_pattern.group(1).upper()
+            accidental = key_pattern.group(2) or ''
+            mode = key_pattern.group(3) or ''
+            
+            # Normalize the mode
+            if mode.lower() == 'minor':
+                mode = 'm'
+            elif mode.lower() == 'major':
+                mode = ''
+            else:
+                mode = ''
+            
+            keyname = f"{note}{accidental}{mode}"
 
+    # Clean up keyname if found
     if keyname:
-        keyname = keyname.replace(' ', '')
-        keyname = keyname[0].upper() + keyname[1:]
+        keyname = keyname.strip()
+        # Normalize case: first letter uppercase, rest as-is for accidentals and 'm'
+        if len(keyname) >= 1:
+            keyname = keyname[0].upper() + keyname[1:]
 
     return keyname, cam
 
