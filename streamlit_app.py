@@ -537,26 +537,16 @@ class HarmonicSequencer:
 
     # Replace the suggest_bridge_keys method in your HarmonicSequencer class with this version:
 
-    def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None,
-                        max_hops: int = 4, beam_width: int = 80) -> List[str]:
+    def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None) -> List[str]:
         c1 = self.key_to_camelot(key1)
         c2 = self.key_to_camelot(key2)
         
-        if not c1 or not c2:
+        if not c1 or not c2 or c1 == c2:
             return []
         
         # If already harmonically compatible, no bridge needed
-        if self.camelot_score(c1, c2) >= 0.8:
+        if c2 in self.camelot_neighbors(c1):
             return []
-        
-        # Parse source and destination
-        m1 = re.match(r'(\d+)([AB])', c1)
-        m2 = re.match(r'(\d+)([AB])', c2)
-        if not m1 or not m2:
-            return []
-        
-        source_num, source_letter = int(m1.group(1)), m1.group(2)
-        dest_num, dest_letter = int(m2.group(1)), m2.group(2)
         
         def get_available_marker(code: str) -> str:
             if not available_keys:
@@ -564,94 +554,58 @@ class HarmonicSequencer:
             available_camelot = [self.key_to_camelot(k) for k in available_keys]
             return " ★" if code in available_camelot else ""
         
-        # Generate all valid harmonic paths between the two keys
-        harmonic_paths = []
+        # Simple BFS to find all shortest harmonic paths
+        from collections import deque
         
-        # Helper function to create wheel movement path
-        def create_wheel_path(start_num: int, end_num: int, letter: str, exclude_endpoints: bool = True) -> List[str]:
-            if start_num == end_num:
-                return []
+        queue = deque([(c1, [])])  # (current_key, path_so_far)
+        visited = {c1}
+        all_paths = []
+        min_length = float('inf')
+        
+        while queue:
+            current, path = queue.popleft()
             
-            path = []
-            # Calculate distances
-            clockwise_distance = (end_num - start_num) % 12
-            counter_clockwise_distance = (start_num - end_num) % 12
-            
-            # Choose shorter path (or clockwise if equal)
-            if clockwise_distance <= counter_clockwise_distance:
-                # Move clockwise
-                current = start_num
-                while current != end_num:
-                    current = (current % 12) + 1
-                    if not exclude_endpoints or current != end_num:
-                        path.append(f"{current}{letter}")
-            else:
-                # Move counter-clockwise
-                current = start_num
-                while current != end_num:
-                    current = ((current - 2) % 12) + 1
-                    if not exclude_endpoints or current != end_num:
-                        path.append(f"{current}{letter}")
-            
-            return path
+            # If path is longer than current minimum, skip
+            if len(path) > min_length:
+                continue
+                
+            # Check all harmonic neighbors
+            for neighbor in self.camelot_neighbors(current):
+                if neighbor == c2:
+                    # Found destination - this is a complete path
+                    final_path = path + [neighbor] if neighbor != c2 else path
+                    if len(final_path) < min_length:
+                        min_length = len(final_path)
+                        all_paths = [final_path]
+                    elif len(final_path) == min_length:
+                        all_paths.append(final_path)
+                elif neighbor not in visited:
+                    visited.add(neighbor)
+                    new_path = path + [neighbor]
+                    queue.append((neighbor, new_path))
         
-        # Case 1: Same number, different letter (relative major/minor)
-        if source_num == dest_num and source_letter != dest_letter:
-            bridge = f"{source_num}{dest_letter}"
-            harmonic_paths.append([bridge])
-        
-        # Case 2: Different numbers, same letter (wheel movement only)
-        elif source_num != dest_num and source_letter == dest_letter:
-            wheel_path = create_wheel_path(source_num, dest_num, source_letter)
-            if wheel_path:
-                harmonic_paths.append(wheel_path)
-        
-        # Case 3: Different numbers and letters (two possible routes)
-        elif source_num != dest_num and source_letter != dest_letter:
-            
-            # Route 1: Change letter first, then move around wheel
-            route1 = [f"{source_num}{dest_letter}"]  # Relative major/minor
-            wheel_movement = create_wheel_path(source_num, dest_num, dest_letter)
-            route1.extend(wheel_movement)
-            harmonic_paths.append(route1)
-            
-            # Route 2: Move around wheel first, then change letter
-            wheel_movement = create_wheel_path(source_num, dest_num, source_letter)
-            if wheel_movement:
-                route2 = wheel_movement + [f"{dest_num}{dest_letter}"]
-                harmonic_paths.append(route2)
-            else:
-                # If no wheel movement needed, just the letter change
-                route2 = [f"{dest_num}{dest_letter}"]
-                harmonic_paths.append(route2)
-        
-        # Case 4: Add single-step harmonic neighbors as alternatives
-        neighbors = self.camelot_neighbors(c1)
-        for neighbor in neighbors:
-            if neighbor != c2:  # Don't include destination
-                # Only include if this neighbor harmonically connects to destination
-                if self.camelot_score(neighbor, c2) >= 0.6:
-                    harmonic_paths.append([neighbor])
-        
-        # Format results
+        # Remove destination from paths and format results
         results = []
         seen_paths = set()
         
-        for path in harmonic_paths:
-            if not path:  # Skip empty paths
+        for path in all_paths:
+            # Remove destination key if it appears in path
+            bridge_path = [step for step in path if step != c2]
+            
+            if not bridge_path:  # Skip empty paths
                 continue
                 
-            path_key = tuple(path)
+            path_key = tuple(bridge_path)
             if path_key in seen_paths:
                 continue
             seen_paths.add(path_key)
             
-            if len(path) == 1:
-                marker = get_available_marker(path[0])
-                formatted = f"{self.camelot_to_display(path[0])}{marker}"
+            if len(bridge_path) == 1:
+                marker = get_available_marker(bridge_path[0])
+                formatted = f"{self.camelot_to_display(bridge_path[0])}{marker}"
             else:
                 path_parts = []
-                for step in path:
+                for step in bridge_path:
                     marker = get_available_marker(step)
                     path_parts.append(f"{self.camelot_to_display(step)}{marker}")
                 formatted = " -> ".join(path_parts)
@@ -659,6 +613,7 @@ class HarmonicSequencer:
             results.append(formatted)
         
         return results
+
     # Sequencing helpers (unchanged)
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
         if not songs:
