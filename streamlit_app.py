@@ -926,7 +926,7 @@ with left_col:
     st.header("Input")
     input_mode = st.radio(
         "Choose input method",
-        ["Upload CSV / Paste", "Fetch from Spotify → SongData"],
+        ["Fetch from Spotify → SongData", "Upload CSV / Paste"],
         key="input_mode_radio"
     )
     uploaded_file = None
