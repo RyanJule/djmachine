@@ -39,8 +39,8 @@ class Song:
 # NOTE: order matters: match 10-12 before single digits.
 CAMLEOT_REGEX = re.compile(r'\(?\s*(?:1[0-2]|[1-9])\s*[ABab]\s*\)?')
 CAMEL_NUMERIC_ONLY = re.compile(r'^\s*\d+(\.\d+)?\s*$')
-KEY_NAME_REGEX = re.compile(r'^[A-Ga-g](?:#|b)?m?$')
-KEY_NAME_IN_CELL = re.compile(r'[A-Ga-g](?:#|b)?(?:\s*(?:m|min|major|minor))?', re.I)
+KEY_NAME_REGEX = re.compile(r'^[A-Ga-g](?:#|b)?m?$') #contains the word 
+KEY_NAME_IN_CELL = re.compile(r'[A-Ga-g](?:#|b)?(?:\s*(?:major|minor))?', re.I)
 
 
 def is_probable_camelot(cell: str) -> bool:
@@ -63,11 +63,7 @@ def is_probable_keyname(cell: str) -> bool:
     if not cell or str(cell).strip() == '':
         return False
     s = str(cell).strip()
-    if KEY_NAME_REGEX.match(s):
-        return True
-    if '(' in s and CAMLEOT_REGEX.search(s) and KEY_NAME_IN_CELL.search(s):
-        return True
-    if re.search(r'^[A-Ga-g](?:#|b)?\s*(?:minor|major|min|maj)$', s, re.I):
+    if re.search(r'^[A-Ga-g](?:#|b)?\s*(?:minor|major)$', s, re.I):
         return True
     return False
 
@@ -93,16 +89,10 @@ def detect_key_column_from_rows(rows: List[List[str]], headers: List[str]) -> Op
             if cs == "":
                 continue
             counts[j] += 1
-            if is_probable_camelot(cs) or is_probable_keyname(cs):
+            if is_probable_keyname(cs):
                 scores[j] += 1
 
     ratios = [(scores[i] / counts[i]) if counts[i] > 0 else 0.0 for i in range(ncols)]
-
-    # Prefer explicit "camelot" header if present
-    camelot_indices = [i for i, h in enumerate(headers) if 'camelot' in h.lower()]
-    if camelot_indices:
-        # prefer first camelot column
-        return camelot_indices[0]
 
     # Otherwise consider a 'key' header (only if it actually looks key-like based on content)
     key_indices = [i for i, h in enumerate(headers) if 'key' in h.lower()]
@@ -110,12 +100,6 @@ def detect_key_column_from_rows(rows: List[List[str]], headers: List[str]) -> Op
         ki = key_indices[0]
         if ki < len(ratios) and ratios[ki] > 0.25:
             return ki
-
-    # fallback to the column with the best ratio (if decent)
-    best_idx = int(np.argmax(ratios))
-    best_ratio = ratios[best_idx] if best_idx < len(ratios) else 0.0
-    if best_ratio >= 0.25:
-        return best_idx
 
     # final fallback: None
     return None
