@@ -757,6 +757,8 @@ class HarmonicSequencer:
         return results
 
     # Sequencing helpers (unchanged)
+    # Replace the create_harmonic_sequence method with this simple graph traversal:
+
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
         if not songs:
             return []
@@ -764,116 +766,67 @@ class HarmonicSequencer:
         if len(songs) == 1:
             return songs[:]
         
-        # Strategy: Use a more sophisticated algorithm that considers the entire collection
-        # Rather than greedy "next best", we'll use a approach that minimizes total harmonic gaps
+        # Group songs by their Camelot codes
+        camelot_groups = {}
+        unkeyed_songs = []
         
-        def calculate_total_sequence_score(sequence: List[Song]) -> float:
-            """Calculate the total harmonic score for a complete sequence"""
-            if len(sequence) <= 1:
-                return 0.0
-            
-            total_score = 0.0
-            for i in range(len(sequence) - 1):
-                score = self._distance_score(sequence[i].key, sequence[i + 1].key)
-                total_score += score
-            return total_score / (len(sequence) - 1)  # Average score per transition
-        
-        # For small collections, try all permutations (up to ~8 songs)
-        if len(songs) <= 8:
-            from itertools import permutations
-            
-            best_sequence = songs[:]
-            best_score = calculate_total_sequence_score(best_sequence)
-            
-            # Try different starting songs to find globally optimal sequence
-            for perm in permutations(songs):
-                score = calculate_total_sequence_score(list(perm))
-                if score > best_score:
-                    best_score = score
-                    best_sequence = list(perm)
-            
-            return best_sequence
-        
-        # For larger collections, use improved heuristic approach
-        else:
-            # Group songs by their camelot codes
-            camelot_groups = {}
-            for song in songs:
-                camelot = self.key_to_camelot(song.key) or "unknown"
+        for song in songs:
+            camelot = self.key_to_camelot(song.key)
+            if camelot:
                 if camelot not in camelot_groups:
                     camelot_groups[camelot] = []
                 camelot_groups[camelot].append(song)
+            else:
+                unkeyed_songs.append(song)
+        
+        if not camelot_groups:
+            # No valid keys detected, return original order
+            return songs[:]
+        
+        # Simple graph traversal: visit connected components
+        sequence = []
+        visited_keys = set()
+        
+        def get_unvisited_neighbors(camelot_code):
+            """Get harmonic neighbors that still have unvisited songs"""
+            neighbors = self.camelot_neighbors(camelot_code)
+            return [n for n in neighbors if n in camelot_groups and n not in visited_keys]
+        
+        def visit_key_group(camelot_code):
+            """Add all songs from this key group to sequence and mark as visited"""
+            if camelot_code in camelot_groups and camelot_code not in visited_keys:
+                sequence.extend(camelot_groups[camelot_code])
+                visited_keys.add(camelot_code)
+                return True
+            return False
+        
+        # Start with any key that has the most songs (natural starting point)
+        start_key = max(camelot_groups.keys(), key=lambda k: len(camelot_groups[k]))
+        current_key = start_key
+        visit_key_group(current_key)
+        
+        # Traverse the graph by always moving to connected neighbors
+        while len(visited_keys) < len(camelot_groups):
+            neighbors = get_unvisited_neighbors(current_key)
             
-            # Start with the most common key or a strategic choice
-            remaining_songs = songs[:]
-            sequence = []
-            
-            # Choose starting song: prefer keys that have neighbors in the collection
-            def count_harmonic_connections(song: Song) -> int:
-                """Count how many other songs this song connects well to"""
-                camelot = self.key_to_camelot(song.key)
-                if not camelot:
-                    return 0
-                
-                neighbors = self.camelot_neighbors(camelot)
-                connections = 0
-                for other_song in remaining_songs:
-                    if other_song == song:
-                        continue
-                    other_camelot = self.key_to_camelot(other_song.key)
-                    if other_camelot in neighbors or other_camelot == camelot:
-                        connections += 1
-                return connections
-            
-            # Start with song that has most harmonic connections
-            start_song = max(remaining_songs, key=count_harmonic_connections)
-            sequence.append(start_song)
-            remaining_songs.remove(start_song)
-            
-            # Build sequence using improved lookahead
-            while remaining_songs:
-                current_song = sequence[-1]
-                current_camelot = self.key_to_camelot(current_song.key)
-                
-                if not current_camelot:
-                    # If we can't determine key, fall back to first remaining
-                    next_song = remaining_songs[0]
-                else:
-                    # Look for best next song considering:
-                    # 1. Direct harmonic compatibility
-                    # 2. Whether it helps connect to other remaining songs
-                    # 3. Whether we have multiple songs in the same key (group them)
-                    
-                    def evaluate_next_song(candidate: Song) -> float:
-                        candidate_camelot = self.key_to_camelot(candidate.key)
-                        
-                        # Base harmonic score to this candidate
-                        base_score = self._distance_score(current_song.key, candidate.key)
-                        
-                        # Bonus for grouping songs of same key together
-                        same_key_bonus = 0.0
-                        same_key_songs = [s for s in remaining_songs if self.key_to_camelot(s.key) == candidate_camelot]
-                        if len(same_key_songs) > 1:
-                            same_key_bonus = 0.1  # Small bonus to group same keys
-                        
-                        # Bonus for songs that connect well to many remaining songs
-                        remaining_after = [s for s in remaining_songs if s != candidate]
-                        connection_bonus = 0.0
-                        if remaining_after and candidate_camelot:
-                            neighbors = self.camelot_neighbors(candidate_camelot)
-                            connections = sum(1 for s in remaining_after 
-                                        if self.key_to_camelot(s.key) in neighbors or 
-                                            self.key_to_camelot(s.key) == candidate_camelot)
-                            connection_bonus = (connections / len(remaining_after)) * 0.05
-                        
-                        return base_score + same_key_bonus + connection_bonus
-                    
-                    next_song = max(remaining_songs, key=evaluate_next_song)
-                
-                sequence.append(next_song)
-                remaining_songs.remove(next_song)
-            
-            return sequence
+            if neighbors:
+                # Move to neighbor with most songs (prefer to clear larger groups)
+                next_key = max(neighbors, key=lambda k: len(camelot_groups[k]))
+                visit_key_group(next_key)
+                current_key = next_key
+            else:
+                # No connected neighbors left, jump to any remaining unvisited key
+                remaining_keys = [k for k in camelot_groups.keys() if k not in visited_keys]
+                if remaining_keys:
+                    # Choose remaining key with most songs
+                    next_key = max(remaining_keys, key=lambda k: len(camelot_groups[k]))
+                    visit_key_group(next_key)
+                    current_key = next_key
+        
+        # Append any unkeyed songs at the end
+        sequence.extend(unkeyed_songs)
+        
+        return sequence
 
     def find_mixing_pairs(self, songs: List[Song]) -> List[Tuple[Song, Song, float]]:
         pairs = []
