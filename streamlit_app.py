@@ -719,6 +719,8 @@ def fetch_bpm_from_web(title: str, artist: str, timeout: float = 5.0) -> Optiona
 # -----------------------
 # Streamlit UI
 # -----------------------
+# ...existing code...
+
 st.title("Harmonic Song Analyzer 🎧 — Camelot + SongData")
 st.markdown("Analyze playlists, build harmonic play orders, and get bridge-key suggestions (Camelot system).")
 
@@ -726,33 +728,42 @@ left_col, right_col = st.columns([1, 2])
 
 with left_col:
     st.header("Input")
-    input_mode = st.radio("Choose input method", ["Upload CSV / Paste", "Fetch from Spotify → SongData"])
+    input_mode = st.radio(
+        "Choose input method",
+        ["Upload CSV / Paste", "Fetch from Spotify → SongData"],
+        key="input_mode_radio"
+    )
     uploaded_file = None
     pasted_text = ""
     songdata_input = ""
-    sd_timeout = 30
+    sd_timeout = 300
     sd_debug = False
     fetch_songdata_btn = False
 
     if input_mode == "Upload CSV / Paste":
-        uploaded_file = st.file_uploader("Upload CSV of songs (title,artist,key,tempo?)", type=["csv"])
-        pasted_text = st.text_area("Or paste CSV/text (title,artist,key,tempo)", height=160)
+        # Add unique key if you use a file uploader
+        uploaded_file = st.file_uploader("Upload CSV", type=["csv"], key="csv_uploader")
+        pasted_text = st.text_area("Paste CSV or song list here", key="csv_paste_area")
     else:
-        songdata_input = st.text_input("Spotify playlist URL or URI", placeholder="https://open.spotify.com/playlist/...")
-        sd_timeout = st.number_input("SongData fetch timeout (seconds)", min_value=5, max_value=120, value=30, step=5)
-        sd_debug = st.checkbox("Show SongData fetch debug info", value=False)
+        songdata_input = st.text_input("Spotify playlist URL", key="spotify_url_input")
+        sd_timeout = st.slider("SongData fetch timeout (seconds)", min_value=5, max_value=600, value=300, key="sd_timeout_slider")
+        sd_debug = st.checkbox("Show SongData fetch debug info", value=False, key="sd_debug_checkbox")
         fetch_songdata_btn = st.button("Fetch SongData playlist", key="fetch_songdata_btn")
 
     st.markdown("---")
     st.header("Options")
-    shuffle_flag = st.checkbox("Shuffle input order before sequencing", value=False)
-    show_normalized = st.checkbox("Show normalized keys & Camelot codes", value=True)
-    auto_bpm = st.checkbox("Attempt to fetch missing tempos (slow)", value=False)
+    shuffle_flag = st.checkbox("Shuffle input order before sequencing", value=False, key="shuffle_checkbox")
+    show_normalized = st.checkbox("Show normalized keys & Camelot codes", value=True, key="show_normalized_checkbox")
+    auto_bpm = st.checkbox("Attempt to fetch missing tempos (slow)", value=False, key="auto_bpm_checkbox")
     st.markdown("Advanced bridge options:")
-    max_bridge_hops = st.slider("Max bridge hops (beam search depth)", min_value=2, max_value=5, value=4)
-    beam_width = st.slider("Beam width (search pruning)", min_value=20, max_value=200, value=80)
+    max_bridge_hops = st.slider("Max bridge hops (beam search depth)", min_value=2, max_value=5, value=4, key="max_bridge_hops_slider")
+    beam_width = st.slider("Beam width (search pruning)", min_value=20, max_value=200, value=80, key="beam_width_slider")
     st.markdown("---")
     st.header("Export / Save")
+    # If you have export buttons, add keys:
+    # st.button("Export playlist", key="export_playlist_btn")
+
+# ...existing code...
     # export in right pane
 
 songs: List[Song] = []
