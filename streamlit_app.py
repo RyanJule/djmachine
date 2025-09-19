@@ -558,15 +558,21 @@ class HarmonicSequencer:
         def boost_for_available(code: str) -> float:
             return 0.12 if code in available_camelot else 0.0
 
+
+        # Update single candidates scoring to use average
         single_candidates: List[Tuple[str, float]] = []
         for cand in all_codes:
             if cand in (c1, c2):
                 continue
-            score = self.camelot_score(c1, cand) + self.camelot_score(cand, c2) + boost_for_available(cand)
-            if score > 1.2:
-                single_candidates.append((cand, score))
+            s1 = self.camelot_score(c1, cand)
+            s2 = self.camelot_score(cand, c2)
+            avg_score = (s1 + s2) / 2  # Average score for the path
+            total_score = avg_score + boost_for_available(cand)
+            if total_score > 0.6:  # Adjusted threshold for average-based scoring
+                single_candidates.append((cand, total_score))
         single_candidates.sort(key=lambda x: x[1], reverse=True)
 
+        # Update two-step scoring to use average
         two_step: List[Tuple[Tuple[str, str], float]] = []
         for a in all_codes:
             if a in (c1, c2):
@@ -581,8 +587,9 @@ class HarmonicSequencer:
                 s3 = self.camelot_score(b, c2)
                 if s2 < 0.32 or s3 < 0.32:
                     continue
-                score = s1 + s2 + s3 + boost_for_available(a) + boost_for_available(b)
-                two_step.append(((a, b), score))
+                avg_score = (s1 + s2 + s3) / 3  # Average score across all transitions
+                total_score = avg_score + (boost_for_available(a) + boost_for_available(b)) / 2
+                two_step.append(((a, b), total_score))
         two_step.sort(key=lambda x: x[1], reverse=True)
 
         def find_chains(max_hops_local: int = max_hops, beam_width_local: int = beam_width,
@@ -591,7 +598,7 @@ class HarmonicSequencer:
             results: List[Tuple[List[str], float]] = []
             for depth in range(1, max_hops_local + 1):
                 new_beams: List[Tuple[List[str], float]] = []
-                for path, score in beams:
+                for path, total_score in beams:
                     last = path[-1]
                     for cand in all_codes:
                         if cand in path:
@@ -599,15 +606,20 @@ class HarmonicSequencer:
                         edge = self.camelot_score(last, cand)
                         if edge < min_edge_score:
                             continue
-                        new_score = score + edge + boost_for_available(cand)
+                        # Calculate average score for the entire path including new edge
+                        path_length = len(path)
+                        avg_score = (total_score * (path_length - 1) + edge) / path_length
+                        boost = boost_for_available(cand)
                         new_path = path + [cand]
                         if cand == c2:
-                            results.append((new_path[1:], new_score))
+                            results.append((new_path[1:], avg_score + boost))
                         else:
-                            new_beams.append((new_path, new_score))
-                beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_width_local]
+                            new_beams.append((new_path, avg_score * path_length + boost))
+                beams = sorted(new_beams, key=lambda x: x[1]/len(x[0]), reverse=True)[:beam_width_local]
             results.sort(key=lambda x: x[1], reverse=True)
             return results
+
+        # ...rest of the existing code...
 
         chain_results = find_chains()
 
