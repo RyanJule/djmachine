@@ -533,6 +533,8 @@ class HarmonicSequencer:
         return self.camelot_score(ca, cb)
 
     # Bridge logic (single, two-step, multi-hop) preserved...
+    # Replace the suggest_bridge_keys method in your HarmonicSequencer class with this version:
+
     def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None,
                             max_hops: int = 4, beam_width: int = 80) -> List[str]:
         c1 = self.key_to_camelot(key1)
@@ -558,21 +560,26 @@ class HarmonicSequencer:
         def boost_for_available(code: str) -> float:
             return 0.12 if code in available_camelot else 0.0
 
-
-        # Update single candidates scoring to use average
+        # NEW APPROACH: Score paths by their WEAKEST link (minimum transition score)
+        # This encourages smoother overall transitions rather than shorter paths
+        
+        # Single step candidates - score by minimum of the two transitions
         single_candidates: List[Tuple[str, float]] = []
         for cand in all_codes:
             if cand in (c1, c2):
                 continue
             s1 = self.camelot_score(c1, cand)
             s2 = self.camelot_score(cand, c2)
-            avg_score = (s1 + s2) / 2  # Average score for the path
-            total_score = avg_score + boost_for_available(cand)
-            if total_score > 0.6:  # Adjusted threshold for average-based scoring
+            # Use minimum score (weakest link) instead of average
+            min_score = min(s1, s2)
+            # Add a small bonus for higher minimum scores to break ties
+            harmonic_bonus = min_score * 0.1 if min_score > 0.8 else 0
+            total_score = min_score + boost_for_available(cand) + harmonic_bonus
+            if min_score > 0.4:  # Only consider if the weakest transition is decent
                 single_candidates.append((cand, total_score))
         single_candidates.sort(key=lambda x: x[1], reverse=True)
 
-        # Update two-step scoring to use average
+        # Two-step candidates - score by minimum transition in the path
         two_step: List[Tuple[Tuple[str, str], float]] = []
         for a in all_codes:
             if a in (c1, c2):
@@ -587,58 +594,75 @@ class HarmonicSequencer:
                 s3 = self.camelot_score(b, c2)
                 if s2 < 0.32 or s3 < 0.32:
                     continue
-                avg_score = (s1 + s2 + s3) / 3  # Average score across all transitions
-                total_score = avg_score + (boost_for_available(a) + boost_for_available(b)) / 2
+                # Use minimum score across all transitions
+                min_score = min(s1, s2, s3)
+                # Bonus for paths where all transitions are strong
+                consistency_bonus = 0.05 if min([s1, s2, s3]) > 0.7 else 0
+                total_score = min_score + (boost_for_available(a) + boost_for_available(b)) / 2 + consistency_bonus
                 two_step.append(((a, b), total_score))
         two_step.sort(key=lambda x: x[1], reverse=True)
 
         def find_chains(max_hops_local: int = max_hops, beam_width_local: int = beam_width,
                         min_edge_score: float = 0.32):
-            beams: List[Tuple[List[str], float]] = [([c1], 0.0)]
+            beams: List[Tuple[List[str], float]] = [([c1], 1.0)]  # Start with perfect score
             results: List[Tuple[List[str], float]] = []
+            
             for depth in range(1, max_hops_local + 1):
                 new_beams: List[Tuple[List[str], float]] = []
-                for path, total_score in beams:
+                for path, current_min_score in beams:
                     last = path[-1]
                     for cand in all_codes:
                         if cand in path:
                             continue
-                        edge = self.camelot_score(last, cand)
-                        if edge < min_edge_score:
+                        edge_score = self.camelot_score(last, cand)
+                        if edge_score < min_edge_score:
                             continue
-                        # Calculate average score for the entire path including new edge
-                        path_length = len(path)
-                        avg_score = (total_score * (path_length - 1) + edge) / path_length
+                        
+                        # The path quality is determined by its weakest transition
+                        new_min_score = min(current_min_score, edge_score)
                         boost = boost_for_available(cand)
+                        
                         new_path = path + [cand]
                         if cand == c2:
-                            results.append((new_path[1:], avg_score + boost))
+                            # Found a complete path - add consistency bonus for longer smooth paths
+                            path_length = len(new_path) - 1
+                            length_bonus = 0.02 * path_length if new_min_score > 0.6 else 0
+                            final_score = new_min_score + boost + length_bonus
+                            results.append((new_path[1:], final_score))
                         else:
-                            new_beams.append((new_path, avg_score * path_length + boost))
-                beams = sorted(new_beams, key=lambda x: x[1]/len(x[0]), reverse=True)[:beam_width_local]
+                            new_beams.append((new_path, new_min_score + boost * 0.5))  # Partial boost for intermediate nodes
+                    
+                    # Sort by minimum score (path quality) rather than average
+                    beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_width_local]
+            
+            # Sort results by path quality (minimum transition score)
             results.sort(key=lambda x: x[1], reverse=True)
             return results
 
-        # ...rest of the existing code...
-
         chain_results = find_chains()
 
+        # Combine all results, but now they're properly sorted by harmonic quality
         results: List[str] = []
+        
+        # Add single-step bridges (best harmonic transitions first)
         for cand, score in single_candidates[:6]:
             disp = self.camelot_to_display(cand)
             if disp not in results:
                 results.append(disp)
 
+        # Add two-step bridges (best harmonic flows first)
         for (a, b), score in two_step[:6]:
             formatted = f"{self.camelot_to_display(a)} -> {self.camelot_to_display(b)}"
             if formatted not in results:
                 results.append(formatted)
 
+        # Add multi-step bridges (smoothest harmonic flows first)
         for path, score in chain_results[:6]:
             formatted = " -> ".join(self.camelot_to_display(p) for p in path)
             if formatted not in results:
                 results.append(formatted)
 
+        # Fallback if no good bridges found
         if not results:
             neigh = self.camelot_neighbors(c1)
             for n in neigh:
