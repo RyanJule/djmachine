@@ -195,6 +195,7 @@ def extract_spotify_playlist_id(spotify_url: str) -> Optional[str]:
 def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool = False) -> Tuple[List[Song], str, Dict]:
     """
     Fetch SongData playlist and detect which column contains keys/camelot.
+    Uses header <th id="..."> when available to map columns precisely.
     Returns (songs, songdata_url, debug_info).
     """
     pid = extract_spotify_playlist_id(spotify_url)
@@ -213,27 +214,82 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
     soup = BeautifulSoup(r.text, 'html.parser')
     tables = soup.find_all('table')
     songs: List[Song] = []
-    debug_info = {'headers_seen': [], 'first_rows': [], 'chosen_key_column': None}
+    debug_info = {
+        'headers_seen': [],
+        'first_rows': [],
+        'chosen_key_column': None,
+        'header_id_map': {}
+    }
+
+    # helper to parse int bpm
+    def parse_tempo(text: str):
+        if not text:
+            return None
+        m = re.search(r'(\d{2,3})', text)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return None
+        return None
 
     for table in tables:
-        headers = []
+        # find header th elements (prefer <thead>)
         thead = table.find('thead')
+        header_ths = []
         if thead:
-            headers = [th.get_text(strip=True) for th in thead.find_all('th')]
+            # use the header row inside thead (could be multiple rows; take the last header row)
+            header_rows = thead.find_all('tr')
+            if header_rows:
+                header_ths = header_rows[-1].find_all('th')
         else:
+            # fallback: first tr in table
             first_row = table.find('tr')
             if first_row:
-                headers = [td.get_text(strip=True) for td in first_row.find_all(['th', 'td'])]
-        headers = [h.strip() for h in headers if h.strip()]
-        if not headers:
-            continue
+                header_ths = first_row.find_all('th')
 
-        debug_info['headers_seen'].append(headers)
-        lheaders = [h.lower() for h in headers]
+        # build header id -> position map AND heuristic label -> position
+        header_pos_map: Dict[str, int] = {}
+        id_map: Dict[str, int] = {}
+        text_map: Dict[str, int] = {}
+        header_texts: List[str] = []
 
-        has_title = any('title' in h or 'song' in h or 'track' in h for h in lheaders)
-        has_artist = any('artist' in h for h in lheaders)
-        if not (has_title and has_artist):
+        for pos, th in enumerate(header_ths):
+            th_id = (th.get('id') or "").strip().lower()
+            data_col = th.get('data-column-index')
+            th_text = th.get_text(strip=True)
+            ltxt = th_text.lower().strip()
+            header_texts.append(th_text)
+            if th_id:
+                id_map[th_id] = pos
+            # heuristics based on visible header text
+            if 'track' in ltxt or 'title' in ltxt or 'song' in ltxt:
+                text_map.setdefault('title', pos)
+            if 'artist' in ltxt:
+                text_map.setdefault('artist', pos)
+            if 'camelot' in ltxt:
+                text_map.setdefault('camelot', pos)
+            if ltxt == 'key' or 'key' in ltxt:
+                # avoid mis-classifying 'monkey' etc. but that's unlikely in table headers
+                text_map.setdefault('key', pos)
+            if 'bpm' in ltxt or 'tempo' in ltxt:
+                text_map.setdefault('tempo', pos)
+
+            # store data-column-index if present (as int) for debugging / fallback
+            if data_col is not None:
+                try:
+                    header_pos_map[f"colidx_{int(data_col)}"] = pos
+                except Exception:
+                    pass
+
+        debug_info['headers_seen'].append(header_texts)
+        debug_info['header_id_map'].update(id_map)
+
+        # quick check that table looks like tracks (has title & artist by id/text)
+        found_title = ('track_col' in id_map) or ('title' in text_map) or any('track' in h.lower() or 'title' in h.lower() for h in header_texts)
+        found_artist = ('artist_col' in id_map) or ('artist' in text_map) or any('artist' in h.lower() for h in header_texts)
+        if not (found_title and found_artist):
+            # not our table
             continue
 
         # Build row matrix
@@ -245,26 +301,53 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
             cols = row.find_all(['td', 'th'])
             texts = [c.get_text(strip=True) for c in cols]
             texts = [t if t is not None else "" for t in texts]
+            # normalize number of cells if some rows include fewer cells; keep as-is
             rows_cells.append(texts)
             if len(sample_rows) < 6:
                 sample_rows.append(texts)
         debug_info['first_rows'] = sample_rows
 
-        # detect key-like column
-        key_col_idx = detect_key_column_from_rows(rows_cells, headers)
-        debug_info['chosen_key_column'] = key_col_idx
+        # Determine column indices for fields by prioritizing header ids, then header text heuristics, then detection fallback
+        header_field_index: Dict[str, int] = {}
 
-        # map indices for title/artist/tempo
-        header_map: Dict[str, int] = {}
-        for idx, h in enumerate(lheaders):
-            if any(k in h for k in ("title", "song", "track")) and 'title' not in header_map:
-                header_map['title'] = idx
-            elif 'artist' in h and 'artist' not in header_map:
-                header_map['artist'] = idx
-            elif ('bpm' in h or 'tempo' in h) and 'tempo' not in header_map:
-                header_map['tempo'] = idx
+        # prefer ids if present
+        if 'track_col' in id_map:
+            header_field_index['title'] = id_map['track_col']
+        if 'artist_col' in id_map:
+            header_field_index['artist'] = id_map['artist_col']
+        if 'camelot_col' in id_map:
+            header_field_index['camelot'] = id_map['camelot_col']
+        if 'key_col' in id_map:
+            header_field_index['key'] = id_map['key_col']
+        if 'bpm_col' in id_map:
+            header_field_index['tempo'] = id_map['bpm_col']
 
-        # produce Song objects; prioritize detected Camelot column data
+        # fill missing from text_map
+        for k, pos in text_map.items():
+            if k not in header_field_index:
+                header_field_index[k] = pos
+
+        # If we still don't have key/camelot, try auto-detection function as fallback
+        key_col_idx = None
+        camelot_col_idx = None
+        if 'camelot' in header_field_index:
+            camelot_col_idx = header_field_index['camelot']
+        if 'key' in header_field_index:
+            key_col_idx = header_field_index['key']
+
+        # prefer camelot column as the "key-like" column for explicit camelot values
+        chosen_key_column_for_detection = camelot_col_idx if camelot_col_idx is not None else key_col_idx
+
+        # fallback: use detect_key_column_from_rows if we couldn't find key/camelot by headers
+        if chosen_key_column_for_detection is None:
+            guessed = detect_key_column_from_rows(rows_cells, header_texts)
+            # ensure guessed is an int and within a reasonable range
+            if isinstance(guessed, int) and guessed >= 0:
+                chosen_key_column_for_detection = guessed
+
+        debug_info['chosen_key_column'] = chosen_key_column_for_detection
+
+        # now extract songs using the determined column indices
         for row in rows_cells:
             def get_cell(i: int) -> str:
                 try:
@@ -272,46 +355,69 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
                 except Exception:
                     return ""
 
-            title = get_cell(header_map['title']) if 'title' in header_map and header_map['title'] < len(row) else ""
-            artist = get_cell(header_map['artist']) if 'artist' in header_map and header_map['artist'] < len(row) else ""
-            tempo_txt = get_cell(header_map['tempo']) if 'tempo' in header_map and header_map['tempo'] < len(row) else ""
-            tempo = None
-            if tempo_txt:
-                m = re.search(r'(\d{2,3})', tempo_txt)
-                if m:
-                    try:
-                        tempo = int(m.group(1))
-                    except Exception:
-                        tempo = None
+            # Title & artist (if header indices are out of range, fallback to empty)
+            title = ""
+            artist = ""
+            tempo_txt = ""
+            if 'title' in header_field_index and header_field_index['title'] < len(row):
+                title = get_cell(header_field_index['title'])
+            else:
+                # fallback: try common positions if header mapping failed
+                if len(row) > 2:
+                    title = get_cell(2)
+            if 'artist' in header_field_index and header_field_index['artist'] < len(row):
+                artist = get_cell(header_field_index['artist'])
+            else:
+                if len(row) > 3:
+                    artist = get_cell(3)
 
-            key_val = ""
+            if 'tempo' in header_field_index and header_field_index['tempo'] < len(row):
+                tempo_txt = get_cell(header_field_index['tempo'])
+            else:
+                # fallback: try to parse any cell that contains digits that look like bpm
+                for c in row:
+                    if re.search(r'\b\d{2,3}\b', c):
+                        tempo_txt = c
+                        break
+
+            tempo = parse_tempo(tempo_txt)
+
+            # Key / Camelot extraction -- prefer explicit camelot column, then key column, then guessed column, then scan row
             camelot_val = None
+            key_val = ""
 
-            # 1) Try detected key column first
-            if key_col_idx is not None and key_col_idx < len(row):
-                possible = get_cell(key_col_idx)
+            if 'camelot' in header_field_index and header_field_index['camelot'] < len(row):
+                possible = get_cell(header_field_index['camelot'])
                 kn, cam = extract_key_and_camelot_from_cell(possible)
                 if kn:
                     key_val = kn
                 if cam:
                     camelot_val = cam
 
-            # 2) Try explicit header columns named 'camelot' or 'key' (if any)
-            if (not key_val or key_val == ""):
-                for idx, h in enumerate(lheaders):
-                    if ('camelot' in h or 'key' in h) and idx < len(row):
-                        possible = get_cell(idx)
-                        kn, cam = extract_key_and_camelot_from_cell(possible)
-                        if kn and not key_val:
-                            key_val = kn
-                        if cam and not camelot_val:
-                            camelot_val = cam
+            # try explicit key column
+            if (not key_val or key_val == "") and 'key' in header_field_index and header_field_index['key'] < len(row):
+                possible = get_cell(header_field_index['key'])
+                kn, cam = extract_key_and_camelot_from_cell(possible)
+                if kn and not key_val:
+                    key_val = kn
+                if cam and not camelot_val:
+                    camelot_val = cam
 
-            # 3) fallback: scan row for first cell that looks like a key or camelot
-            if not key_val and not camelot_val:
-                for idx in range(len(row)):
+            # try chosen_key_column_for_detection (guessed)
+            if (not key_val and not camelot_val) and chosen_key_column_for_detection is not None:
+                idx = chosen_key_column_for_detection
+                if idx < len(row):
                     possible = get_cell(idx)
                     kn, cam = extract_key_and_camelot_from_cell(possible)
+                    if kn and not key_val:
+                        key_val = kn
+                    if cam and not camelot_val:
+                        camelot_val = cam
+
+            # final fallback: scan cells
+            if not key_val and not camelot_val:
+                for c in row:
+                    kn, cam = extract_key_and_camelot_from_cell(c)
                     if kn and not key_val:
                         key_val = kn
                     if cam and not camelot_val:
@@ -319,29 +425,27 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
                     if key_val or camelot_val:
                         break
 
-            # Compose a friendly key display string and set Song.camelot if we have it
+            # Compose display key and set camelot on Song object if present
             display_key = ""
             if key_val and camelot_val:
-                # if camelot_val is numeric-only (like '11'), try to keep numeric with A/B if possible later;
-                # still show combined value for clarity.
                 display_key = f"{key_val} ({camelot_val})"
             elif camelot_val:
-                display_key = f"{camelot_val}"
+                display_key = camelot_val
             elif key_val:
                 display_key = key_val
             else:
                 display_key = ""
 
             s = Song(title=title, artist=artist, key=display_key, tempo=tempo)
-            # store detected camelot explicitly when possible
             if camelot_val:
                 s.camelot = camelot_val
             songs.append(s)
 
         if songs:
+            # we parsed what we needed; break out of table loop
             break
 
-    # fallback: try JSON-embedded tracks
+    # fallback: try JSON-embedded tracks (unchanged from your original)
     if not songs:
         scripts = soup.find_all('script')
         for sc in scripts:
