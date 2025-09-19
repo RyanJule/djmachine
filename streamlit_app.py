@@ -541,168 +541,142 @@ class HarmonicSequencer:
                             max_hops: int = 4, beam_width: int = 80) -> List[str]:
         c1 = self.key_to_camelot(key1)
         c2 = self.key_to_camelot(key2)
-        if available_keys:
-            available_camelot = [self.key_to_camelot(k) for k in available_keys]
-            available_camelot = [x for x in available_camelot if x]
-        else:
-            available_camelot = []
-
+        
         if not c1 or not c2:
-            known = c1 or c2
-            if known:
-                neigh = [n for n in self.camelot_neighbors(known) if n in self.camelot_to_key]
-                return [self.camelot_to_display(n) for n in neigh][:6]
             return []
-
+        
+        # If already harmonically compatible, no bridge needed
         if self.camelot_score(c1, c2) >= 0.8:
             return []
-
-        all_codes = list(self.camelot_to_key.keys())
-
-        def boost_for_available(code: str) -> float:
-            return 0.12 if code in available_camelot else 0.0
-
-        # NEW APPROACH: Score paths by their WEAKEST link (minimum transition score)
-        # This encourages smoother overall transitions rather than shorter paths
         
-        # Single step candidates - score by minimum of the two transitions
-        single_candidates: List[Tuple[str, float]] = []
-        for cand in all_codes:
-            if cand in (c1, c2):
-                continue
-            s1 = self.camelot_score(c1, cand)
-            s2 = self.camelot_score(cand, c2)
-            # Use minimum score (weakest link) instead of average
-            min_score = min(s1, s2)
-            # Add a small bonus for higher minimum scores to break ties
-            harmonic_bonus = min_score * 0.1 if min_score > 0.8 else 0
-            total_score = min_score + boost_for_available(cand) + harmonic_bonus
-            if min_score > 0.4:  # Only consider if the weakest transition is decent
-                single_candidates.append((cand, total_score))
-        single_candidates.sort(key=lambda x: x[1], reverse=True)
-
-        # Two-step candidates - score by minimum transition in the path
-        two_step: List[Tuple[Tuple[str, str], float]] = []
-        for a in all_codes:
-            if a in (c1, c2):
-                continue
-            s1 = self.camelot_score(c1, a)
-            if s1 < 0.35:
-                continue
-            for b in all_codes:
-                if b in (c1, c2, a):
-                    continue
-                s2 = self.camelot_score(a, b)
-                s3 = self.camelot_score(b, c2)
-                if s2 < 0.32 or s3 < 0.32:
-                    continue
-                # Use minimum score across all transitions
-                min_score = min(s1, s2, s3)
-                # Bonus for paths where all transitions are strong
-                consistency_bonus = 0.05 if min([s1, s2, s3]) > 0.7 else 0
-                total_score = min_score + (boost_for_available(a) + boost_for_available(b)) / 2 + consistency_bonus
-                two_step.append(((a, b), total_score))
-        two_step.sort(key=lambda x: x[1], reverse=True)
-
-        def find_chains(max_hops_local: int = max_hops, beam_width_local: int = beam_width,
-                        min_edge_score: float = 0.32):
-            beams: List[Tuple[List[str], float]] = [([c1], 1.0)]  # Start with perfect score
-            results: List[Tuple[List[str], float]] = []
+        # Parse source and destination
+        m1 = re.match(r'(\d+)([AB])', c1)
+        m2 = re.match(r'(\d+)([AB])', c2)
+        if not m1 or not m2:
+            return []
+        
+        source_num, source_letter = int(m1.group(1)), m1.group(2)
+        dest_num, dest_letter = int(m2.group(1)), m2.group(2)
+        
+        def available_boost(code: str) -> float:
+            if not available_keys:
+                return 0.0
+            available_camelot = [self.key_to_camelot(k) for k in available_keys]
+            return 0.15 if code in available_camelot else 0.0
+        
+        # Generate all optimal harmonic paths deterministically
+        optimal_paths = []
+        
+        # Path 1: Change letter first, then move around the wheel
+        if source_letter != dest_letter:
+            # Step 1: Switch to opposite letter (relative major/minor)
+            intermediate1 = f"{source_num}{dest_letter}"
             
-            for depth in range(1, max_hops_local + 1):
-                new_beams: List[Tuple[List[str], float]] = []
-                for path, current_min_score in beams:
-                    last = path[-1]
-                    for cand in all_codes:
-                        if cand in path:
-                            continue
-                        edge_score = self.camelot_score(last, cand)
-                        if edge_score < min_edge_score:
-                            continue
-                        
-                        # The path quality is determined by its weakest transition
-                        new_min_score = min(current_min_score, edge_score)
-                        boost = boost_for_available(cand)
-                        
-                        new_path = path + [cand]
-                        if cand == c2:
-                            # Found a complete path - add consistency bonus for longer smooth paths
-                            path_length = len(new_path) - 1
-                            length_bonus = 0.02 * path_length if new_min_score > 0.6 else 0
-                            final_score = new_min_score + boost + length_bonus
-                            results.append((new_path[1:], final_score))
-                        else:
-                            new_beams.append((new_path, new_min_score + boost * 0.5))  # Partial boost for intermediate nodes
-                    
-                    # Sort by minimum score (path quality) rather than average
-                    beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_width_local]
+            if source_num == dest_num:
+                # Direct relative major/minor switch
+                score = 0.95 + available_boost(intermediate1)
+                optimal_paths.append(([intermediate1], score))
+            else:
+                # Switch letter, then move around wheel
+                path = [intermediate1]
+                current_num = source_num
+                
+                # Calculate shortest distance around the wheel
+                clockwise_distance = (dest_num - current_num) % 12
+                counter_clockwise_distance = (current_num - dest_num) % 12
+                
+                if clockwise_distance <= counter_clockwise_distance:
+                    # Move clockwise
+                    while current_num != dest_num:
+                        current_num = (current_num % 12) + 1
+                        path.append(f"{current_num}{dest_letter}")
+                else:
+                    # Move counter-clockwise
+                    while current_num != dest_num:
+                        current_num = ((current_num - 2) % 12) + 1
+                        path.append(f"{current_num}{dest_letter}")
+                
+                # Score based on number of perfect transitions (0.8 per step)
+                base_score = 0.8
+                total_boost = sum(available_boost(step) for step in path)
+                score = base_score + (total_boost / len(path))
+                optimal_paths.append((path, score))
+        
+        # Path 2: Move around wheel first, then change letter
+        if source_num != dest_num:
+            path = []
+            current_num = source_num
             
-            # Sort results by path quality (minimum transition score)
-            results.sort(key=lambda x: x[1], reverse=True)
-            return results
-
-        chain_results = find_chains()
-
-        # Combine ALL candidates with their scores, then sort by score regardless of path length
-        all_candidates: List[Tuple[str, float]] = []
+            # Calculate shortest distance around the wheel
+            clockwise_distance = (dest_num - current_num) % 12
+            counter_clockwise_distance = (current_num - dest_num) % 12
+            
+            if clockwise_distance <= counter_clockwise_distance:
+                # Move clockwise
+                while current_num != dest_num:
+                    current_num = (current_num % 12) + 1
+                    path.append(f"{current_num}{source_letter}")
+            else:
+                # Move counter-clockwise  
+                while current_num != dest_num:
+                    current_num = ((current_num - 2) % 12) + 1
+                    path.append(f"{current_num}{source_letter}")
+            
+            # Then switch letter if needed
+            if source_letter != dest_letter:
+                path.append(f"{dest_num}{dest_letter}")
+            
+            # Score based on perfect harmonic transitions
+            base_score = 0.8
+            total_boost = sum(available_boost(step) for step in path)
+            score = base_score + (total_boost / len(path))
+            optimal_paths.append((path, score))
         
-        # Collect single-step bridges
-        for cand, score in single_candidates:
-            # Skip if bridge uses either source or destination key
-            if cand in (c1, c2):
-                continue
-            disp = self.camelot_to_display(cand)
-            formatted = f"{disp}"
-            all_candidates.append((formatted, score))
-
-        # Collect two-step bridges
-        for (a, b), score in two_step:
-            # Skip if any step in path uses source or destination key
-            if a in (c1, c2) or b in (c1, c2):
-                continue
-            path_display = f"{self.camelot_to_display(a)} -> {self.camelot_to_display(b)}"
-            all_candidates.append((path_display, score))
-
-        # Collect multi-step bridges
-        for path, score in chain_results:
-            # Skip if any step in path uses source or destination key
-            if any(step in (c1, c2) for step in path):
-                continue
-            path_display = " -> ".join(self.camelot_to_display(p) for p in path)
-            all_candidates.append((path_display, score))
-
-        # Sort ALL candidates by score (highest first)
-        all_candidates.sort(key=lambda x: x[1], reverse=True)
+        # Path 3: If same number, direct relative major/minor
+        if source_num == dest_num and source_letter != dest_letter:
+            intermediate = f"{source_num}{dest_letter}"
+            score = 0.95 + available_boost(intermediate)
+            optimal_paths.append(([intermediate], score))
         
-        # Only return paths with the highest score (or tied for highest)
-        if not all_candidates:
-            # Fallback if no valid bridges found
-            neigh = self.camelot_neighbors(c1)
-            results = []
-            for n in neigh:
-                if n in self.camelot_to_key and n not in (c1, c2):
-                    fallback_score = self.camelot_score(c1, n)
-                    formatted = f"{self.camelot_to_display(n)} (score: {fallback_score:.3f})"
-                    results.append(formatted)
-            return results[:3]  # Return top 3 fallback options
+        # Path 4: Single-step neighbors (most harmonic single moves)
+        neighbors = self.camelot_neighbors(c1)
+        for neighbor in neighbors:
+            if neighbor != c2:  # Don't include destination as bridge
+                # Check if this neighbor gets us closer harmonically to destination
+                neighbor_to_dest_score = self.camelot_score(neighbor, c2)
+                if neighbor_to_dest_score >= 0.6:  # Only if it's a good connection
+                    total_score = 0.85 + available_boost(neighbor)  # High score for direct neighbors
+                    optimal_paths.append(([neighbor], total_score))
         
-        # Get the highest score
-        highest_score = all_candidates[0][1]
-        
-        # Filter to only include paths with the highest score (allowing for small floating point differences)
-        tolerance = 0.001  # Small tolerance for floating point comparison
-        top_candidates = [(path, score) for path, score in all_candidates 
-                        if abs(score - highest_score) <= tolerance]
-        
-        # Format results with scores and remove duplicates
-        results: List[str] = []
+        # Remove duplicates and sort by score
         seen_paths = set()
-        for path_display, score in top_candidates:
-            if path_display not in seen_paths:
-                formatted = f"{path_display} (score: {score:.3f})"
+        unique_paths = []
+        for path, score in optimal_paths:
+            path_key = tuple(path)
+            if path_key not in seen_paths:
+                seen_paths.add(path_key)
+                unique_paths.append((path, score))
+        
+        # Sort by score (highest first)
+        unique_paths.sort(key=lambda x: x[1], reverse=True)
+        
+        # Find the highest score and return only paths with that score (or very close)
+        if not unique_paths:
+            return []
+        
+        highest_score = unique_paths[0][1]
+        tolerance = 0.01
+        
+        results = []
+        for path, score in unique_paths:
+            if abs(score - highest_score) <= tolerance:
+                if len(path) == 1:
+                    formatted = f"{self.camelot_to_display(path[0])} (score: {score:.3f})"
+                else:
+                    path_display = " -> ".join(self.camelot_to_display(p) for p in path)
+                    formatted = f"{path_display} (score: {score:.3f})"
                 results.append(formatted)
-                seen_paths.add(path_display)
-
+        
         return results
     # Sequencing helpers (unchanged)
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
