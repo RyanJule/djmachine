@@ -14,7 +14,7 @@ import json
 # -----------------------
 # Page config
 # -----------------------
-st.set_page_config(page_title="Harmonic Song Analyzer — Camelot + SongData",
+st.set_page_config(page_title="Harmonic Song Analyzer â€ Camelot + SongData",
                    page_icon="🎵",
                    layout="wide")
 
@@ -677,11 +677,6 @@ class HarmonicSequencer:
         cb = self.key_to_camelot(b) or ""
         return self.camelot_score(ca, cb)
 
-    # Bridge logic (single, two-step, multi-hop) preserved...
-    # Replace the suggest_bridge_keys method in your HarmonicSequencer class with this version:
-
-    # Replace the suggest_bridge_keys method in your HarmonicSequencer class with this version:
-
     def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None) -> List[str]:
         c1 = self.key_to_camelot(key1)
         c2 = self.key_to_camelot(key2)
@@ -758,15 +753,6 @@ class HarmonicSequencer:
             results.append(formatted)
         
         return results
-
-    # Sequencing helpers (unchanged)
-    # Replace the create_harmonic_sequence method with this simple graph traversal:
-
-    # First, let's fix the camelot_neighbors function to properly handle the circular wheel:
-
-
-
-    # Now replace the create_harmonic_sequence method with this fixed version:
 
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
         if not songs:
@@ -915,10 +901,59 @@ def fetch_bpm_from_web(title: str, artist: str, timeout: float = 5.0) -> Optiona
 # -----------------------
 # Streamlit UI
 # -----------------------
-# ...existing code...
 
 st.title("Harmonic Song Analyzer - Leverages songdata.io and Camelot System for Harmonic Mixing")
 st.markdown("Paste the share link for your spotify playlist in order to build a harmonic play order, and get bridge-key suggestions.")
+
+# Add instructions in expandable section
+with st.expander("📖 Instructions & Help"):
+    st.markdown("""
+    ### Quick Start
+    
+    1. **Choose your input method**:
+       - **Spotify → SongData**: Enter Spotify playlist URL to fetch key data automatically
+       - **Upload CSV**: Include Title, Artist, and Key columns
+       - **Paste Data**: Copy/paste CSV-formatted text
+    
+    2. **Review your playlist**: The app automatically detects keys and converts them to Camelot codes
+    
+    3. **Get your harmonic sequence**: View the optimized play order in the results table
+    
+    ### Supported Key Formats
+    
+    The app understands many key formats:
+    - `C`, `Am`, `F#`, `Bb` (standard)
+    - `C Major`, `A minor` (with mode)
+    - `C♯`, `D♭` (Unicode symbols)
+    - `C (8B)` (key with Camelot code)
+    
+    ### Understanding the Results
+    
+    **Recommended Play Order**: Songs arranged for smooth harmonic transitions
+    
+    **Bridge Suggestions**: When songs don't flow harmonically, the app suggests keys to add between them. Keys marked with ★ are already in your collection.
+    
+    ### The Camelot System
+    
+    Songs flow smoothly between adjacent positions:
+    - **Same number**: 8A ↔ 8B (relative major/minor)
+    - **Adjacent numbers**: 8A → 9A → 10A (energy progression)
+    - **Diagonal**: 8A → 9B (energy + mode change)
+    - **Circular**: 12A connects to 1A (the wheel wraps around)
+    
+    ### Tips
+    
+    - **CSV Format**: Use columns like "Title", "Artist", "Key" or "Camelot"
+    - **SongData URLs**: Works with Spotify playlist URLs (songdata.io analyzes them automatically)
+    - **Mixed Formats**: The app handles various key spellings in the same playlist
+    - **Bridge Keys**: Use suggested bridge keys to fill harmonic gaps in your mix
+    
+    ### Troubleshooting
+    
+    - **Keys not detected?** Check your key format matches the examples above
+    - **SongData not loading?** Try a different Spotify playlist or check the URL format
+    - **No bridge suggestions?** Your playlist already flows harmonically!
+    """)
 
 left_col, right_col = st.columns([1, 2])
 
@@ -937,7 +972,6 @@ with left_col:
     fetch_songdata_btn = False
 
     if input_mode == "Upload CSV / Paste":
-        # Add unique key if you use a file uploader
         uploaded_file = st.file_uploader("Upload CSV", type=["csv"], key="csv_uploader")
         pasted_text = st.text_area("Paste CSV or song list here", key="csv_paste_area")
     else:
@@ -957,7 +991,6 @@ songs: List[Song] = []
 if uploaded_file:
     try:
         df = pd.read_csv(uploaded_file)
-        # detect key column heuristically in uploaded CSV
         def detect_key_col_in_df(df: pd.DataFrame) -> Optional[str]:
             cols = list(df.columns)
             rows = df.fillna("").astype(str).values.tolist()
@@ -968,7 +1001,6 @@ if uploaded_file:
                 for c in cols:
                     if candidate.lower() == str(c).strip().lower():
                         return c
-            # content-based fallback
             for c in cols:
                 series = df[c].astype(str)
                 nonempty = (series.str.strip() != "").sum()
@@ -1000,7 +1032,6 @@ if uploaded_file:
                 elif kn:
                     key_display = kn
                 else:
-                    # fallback: try explicit columns
                     key_display = str(r.get('key') or r.get('Key') or "")
             else:
                 key_display = str(r.get('key') or r.get('Key') or r.get('Input Key') or "")
@@ -1062,10 +1093,10 @@ with right_col:
     if songs:
         hs = HarmonicSequencer()
 
-        if st.checkbox("Shuffle songs before sequencing", value=False):
+        if shuffle_flag:
             np.random.shuffle(songs)
 
-        if st.checkbox("Attempt to fetch missing tempos (slow)", value=False):
+        if auto_bpm:
             with st.spinner("Fetching BPMs..."):
                 for s in songs:
                     if s.tempo is None or (isinstance(s.tempo, float) and np.isnan(s.tempo)):
@@ -1087,12 +1118,12 @@ with right_col:
         st.header("Recommended Play Order")
         rows = []
         for i, s in enumerate(sequence):
+            camelot_display = hs.camelot_to_display(s.camelot) if s.camelot else s.key
             rows.append({
                 'Order': i + 1,
                 'Title': s.title,
                 'Artist': s.artist,
-                'Camelot': hs.camelot_to_display(s.camelot) if s.camelot else '',
-                'Tempo': s.tempo or ''
+                'Camelot': camelot_display
             })
         df_out = pd.DataFrame(rows)
         st.dataframe(df_out)
