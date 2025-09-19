@@ -536,7 +536,7 @@ class HarmonicSequencer:
     # Replace the suggest_bridge_keys method in your HarmonicSequencer class with this version:
 
     def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None,
-                            max_hops: int = 4, beam_width: int = 80) -> List[str]:
+                        max_hops: int = 4, beam_width: int = 80) -> List[str]:
         c1 = self.key_to_camelot(key1)
         c2 = self.key_to_camelot(key2)
         if available_keys:
@@ -641,24 +641,27 @@ class HarmonicSequencer:
 
         chain_results = find_chains()
 
-        # Combine all results, but now they're properly sorted by harmonic quality
+        # Combine all results with scores, properly sorted by harmonic quality
         results: List[str] = []
         
         # Add single-step bridges (best harmonic transitions first)
         for cand, score in single_candidates[:6]:
             disp = self.camelot_to_display(cand)
-            if disp not in results:
-                results.append(disp)
+            formatted = f"{disp} (score: {score:.3f})"
+            if formatted not in results:
+                results.append(formatted)
 
         # Add two-step bridges (best harmonic flows first)
         for (a, b), score in two_step[:6]:
-            formatted = f"{self.camelot_to_display(a)} -> {self.camelot_to_display(b)}"
+            path_display = f"{self.camelot_to_display(a)} -> {self.camelot_to_display(b)}"
+            formatted = f"{path_display} (score: {score:.3f})"
             if formatted not in results:
                 results.append(formatted)
 
         # Add multi-step bridges (smoothest harmonic flows first)
         for path, score in chain_results[:6]:
-            formatted = " -> ".join(self.camelot_to_display(p) for p in path)
+            path_display = " -> ".join(self.camelot_to_display(p) for p in path)
+            formatted = f"{path_display} (score: {score:.3f})"
             if formatted not in results:
                 results.append(formatted)
 
@@ -667,7 +670,10 @@ class HarmonicSequencer:
             neigh = self.camelot_neighbors(c1)
             for n in neigh:
                 if n in self.camelot_to_key:
-                    results.append(self.camelot_to_display(n))
+                    # Calculate score for fallback neighbors
+                    fallback_score = self.camelot_score(c1, n)
+                    formatted = f"{self.camelot_to_display(n)} (score: {fallback_score:.3f})"
+                    results.append(formatted)
 
         return results[:8]
 
