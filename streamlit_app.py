@@ -1375,9 +1375,20 @@ if spotify_client_id and songs:
             st.session_state[key] = None
 
     # Read query params (Streamlit returns lists)
-    params = st.experimental_get_query_params()
-    code = params.get("code", [None])[0]
-    state = params.get("state", [None])[0]
+    params = st.query_params
+    code = None
+    state = None
+    if params is not None:
+        c = params.get('code')
+        s_val = params.get('state')
+        if isinstance(c, list):
+            code = c[0] if c else None
+        else:
+            code = c
+        if isinstance(s_val, list):
+            state = s_val[0] if s_val else None
+        else:
+            state = s_val
 
     # Handle callback: exchange code for token
     if code and state and st.session_state.get("auth_state") and state == st.session_state["auth_state"]:
@@ -1391,7 +1402,7 @@ if spotify_client_id and songs:
             st.session_state.spotify_access_token = token_response.get("access_token")
             st.success("✅ Successfully authenticated with Spotify!")
             # clear params from URL (prevents re-processing)
-            st.experimental_set_query_params()
+            st.query_params.clear()
         except Exception as e:
             st.error(f"Authentication failed: {e}")
 
