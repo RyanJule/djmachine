@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
 from io import StringIO
 import json
+import base64
+import hashlib
+import secrets
+import urllib.parse
+from urllib.parse import urlencode
+
 
 # -----------------------
 # Page config
@@ -897,6 +903,178 @@ def fetch_bpm_from_web(title: str, artist: str, timeout: float = 5.0) -> Optiona
         return None
     return None
 
+def generate_code_verifier():
+    """Generate code verifier for PKCE"""
+    return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8').rstrip('=')
+
+def generate_code_challenge(verifier):
+    """Generate code challenge from verifier for PKCE"""
+    digest = hashlib.sha256(verifier.encode('utf-8')).digest()
+    return base64.urlsafe_b64encode(digest).decode('utf-8').rstrip('=')
+
+def get_spotify_auth_url(client_id: str, redirect_uri: str, code_challenge: str, state: str):
+    """Generate Spotify authorization URL"""
+    scopes = [
+        'playlist-modify-public',
+        'playlist-modify-private', 
+        'playlist-read-private',
+        'playlist-read-collaborative'
+    ]
+    
+    params = {
+        'client_id': client_id,
+        'response_type': 'code',
+        'redirect_uri': redirect_uri,
+        'code_challenge_method': 'S256',
+        'code_challenge': code_challenge,
+        'state': state,
+        'scope': ' '.join(scopes)
+    }
+    
+    return f"https://accounts.spotify.com/authorize?{urlencode(params)}"
+
+def exchange_code_for_token(client_id: str, code: str, redirect_uri: str, code_verifier: str):
+    """Exchange authorization code for access token"""
+    token_data = {
+        'client_id': client_id,
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+        'code_verifier': code_verifier,
+    }
+    
+    response = requests.post(
+        'https://accounts.spotify.com/api/token',
+        data=token_data,
+        headers={'Content-Type': 'application/x-www-form-urlencoded'}
+    )
+    
+    if response.status_code == 200:
+        return response.json()
+    else:
+        raise Exception(f"Token exchange failed: {response.text}")
+
+def get_playlist_tracks(access_token: str, playlist_id: str):
+    """Get current playlist tracks from Spotify"""
+    headers = {'Authorization': f'Bearer {access_token}'}
+    
+    # Get playlist details first
+    playlist_response = requests.get(
+        f'https://api.spotify.com/v1/playlists/{playlist_id}',
+        headers=headers
+    )
+    
+    if playlist_response.status_code != 200:
+        raise Exception(f"Failed to fetch playlist: {playlist_response.text}")
+    
+    playlist_data = playlist_response.json()
+    tracks = []
+    
+    # Get all tracks (handle pagination)
+    url = f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks'
+    while url:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            raise Exception(f"Failed to fetch tracks: {response.text}")
+        
+        data = response.json()
+        tracks.extend(data['items'])
+        url = data['next']  # Next page URL or None
+    
+    return playlist_data, tracks
+
+def reorder_playlist_tracks(access_token: str, playlist_id: str, reorder_operations: list):
+    """Reorder tracks in a Spotify playlist based on operations list"""
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    
+    # Get current snapshot_id
+    playlist_response = requests.get(
+        f'https://api.spotify.com/v1/playlists/{playlist_id}',
+        headers=headers
+    )
+    
+    if playlist_response.status_code != 200:
+        raise Exception(f"Failed to get playlist info: {playlist_response.text}")
+    
+    snapshot_id = playlist_response.json()['snapshot_id']
+    
+    # Execute reorder operations
+    for operation in reorder_operations:
+        reorder_data = {
+            'range_start': operation['range_start'],
+            'insert_before': operation['insert_before'],
+            'snapshot_id': snapshot_id
+        }
+        
+        if 'range_length' in operation:
+            reorder_data['range_length'] = operation['range_length']
+        
+        response = requests.put(
+            f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks',
+            headers=headers,
+            json=reorder_data
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Failed to reorder tracks: {response.text}")
+        
+        # Update snapshot_id for next operation
+        snapshot_id = response.json()['snapshot_id']
+    
+    return snapshot_id
+
+def calculate_reorder_operations(original_tracks: list, target_order: list):
+    """Calculate the minimum reorder operations needed to achieve target order"""
+    # Create mapping from track URI to position in target order
+    target_positions = {}
+    for i, song in enumerate(target_order):
+        # Find matching track in original tracks by title and artist
+        for j, track_item in enumerate(original_tracks):
+            track = track_item['track']
+            if (track and 
+                track.get('name', '').lower() == song.title.lower() and
+                track.get('artists') and
+                any(artist.get('name', '').lower() == song.artist.lower() 
+                    for artist in track['artists'])):
+                target_positions[j] = i
+                break
+    
+    # Generate reorder operations
+    operations = []
+    current_positions = list(range(len(original_tracks)))
+    
+    for target_pos in range(len(target_order)):
+        # Find current position of track that should be at target_pos
+        current_track_original_pos = None
+        for orig_pos, current_pos in enumerate(current_positions):
+            if orig_pos in target_positions and target_positions[orig_pos] == target_pos:
+                current_track_original_pos = orig_pos
+                break
+        
+        if current_track_original_pos is None:
+            continue
+            
+        # Find where this track currently is
+        current_pos = current_positions.index(current_track_original_pos)
+        
+        if current_pos != target_pos:
+            # Need to move track from current_pos to target_pos
+            operations.append({
+                'range_start': current_pos,
+                'insert_before': target_pos if target_pos < current_pos else target_pos + 1,
+                'range_length': 1
+            })
+            
+            # Update current_positions to reflect the move
+            track_to_move = current_positions.pop(current_pos)
+            insert_pos = target_pos if target_pos < current_pos else target_pos
+            current_positions.insert(insert_pos, track_to_move)
+    
+    return operations
+
 
 # -----------------------
 # Streamlit UI
@@ -1163,6 +1341,161 @@ with right_col:
     else:
         st.info("No songs loaded yet. Upload/paste songs or fetch a SongData playlist using the left panel.")
 
+st.markdown("---")
+st.header("🎵 Spotify Integration")
+
+# Configure your app's Spotify Client ID here (replace with your actual Client ID)
+# You create ONE Spotify app at https://developer.spotify.com/dashboard
+# Set redirect URI based on environment:
+# - Local development: http://127.0.0.1:8501/ (localhost not allowed by Spotify)
+# - Production: https://your-app.streamlit.app/ (your actual deployed URL)
+SPOTIFY_CLIENT_ID = st.secrets.get("SPOTIFY_CLIENT_ID", "")
+
+# Determine redirect URI based on environment
+if 'localhost' in str(st._config.get_option('server.headless')):
+    # Production/deployed environment
+    REDIRECT_URI = "https://your-app.streamlit.app/"  # Replace with your actual deployment URL
+else:
+    # Local development
+    REDIRECT_URI = "http://127.0.0.1:8501/"
+
+if not SPOTIFY_CLIENT_ID:
+    st.warning("""
+    **Spotify integration not configured.** 
+    
+    To enable playlist reordering, the app developer needs to:
+    1. Create a Spotify app at [developer.spotify.com](https://developer.spotify.com/dashboard)
+    2. Add the Client ID to the app's secrets
+    3. Configure redirect URIs in the Spotify app:
+       - Local development: `http://127.0.0.1:8501/`
+       - Production: `https://your-app.streamlit.app/` (replace with actual URL)
+    """)
+    spotify_client_id = None
+else:
+    spotify_client_id = SPOTIFY_CLIENT_ID
+    st.info("Spotify integration is available! Sign in below to reorder your playlists.")
+
+# Spotify authentication
+if spotify_client_id and songs:
+    st.markdown("### 🔐 Spotify Authentication")
+    
+    # Initialize session state for Spotify auth
+    if 'spotify_access_token' not in st.session_state:
+        st.session_state.spotify_access_token = None
+    if 'code_verifier' not in st.session_state:
+        st.session_state.code_verifier = None
+    if 'auth_state' not in st.session_state:
+        st.session_state.auth_state = None
+    
+    # Check for authorization code in URL parameters
+    query_params = st.experimental_get_query_params()
+    
+    if 'code' in query_params and 'state' in query_params:
+        if (st.session_state.auth_state and 
+            query_params['state'][0] == st.session_state.auth_state and
+            st.session_state.code_verifier):
+            
+            try:
+                token_response = exchange_code_for_token(
+                    client_id=spotify_client_id,
+                    code=query_params['code'][0],
+                    redirect_uri=REDIRECT_URI,
+                    code_verifier=st.session_state.code_verifier
+                )
+                
+                st.session_state.spotify_access_token = token_response['access_token']
+                st.success("✅ Successfully authenticated with Spotify!")
+                
+                # Clear URL parameters
+                st.experimental_set_query_params()
+                
+            except Exception as e:
+                st.error(f"Authentication failed: {e}")
+    
+    if not st.session_state.spotify_access_token:
+        st.info("Authenticate with Spotify to enable playlist reordering")
+        
+        if st.button("🎵 Authenticate with Spotify"):
+            # Generate PKCE parameters
+            code_verifier = generate_code_verifier()
+            code_challenge = generate_code_challenge(code_verifier)
+            auth_state = secrets.token_urlsafe(32)
+            
+            # Store in session state
+            st.session_state.code_verifier = code_verifier
+            st.session_state.auth_state = auth_state
+            
+            # Generate auth URL
+            auth_url = get_spotify_auth_url(
+                client_id=spotify_client_id,
+                redirect_uri=REDIRECT_URI,
+                code_challenge=code_challenge,
+                state=auth_state
+            )
+            
+            st.markdown(f"[Click here to authenticate with Spotify]({auth_url})")
+            st.info("After authentication, you'll be redirected back to this page.")
+    
+    else:
+        st.success("✅ Authenticated with Spotify")
+        
+        # Extract playlist ID from original input
+        if songdata_input:
+            playlist_id = extract_spotify_playlist_id(songdata_input)
+            
+            if playlist_id and sequence:
+                st.markdown("### 🎯 Apply Harmonic Order to Spotify Playlist")
+                st.info(f"Playlist ID: {playlist_id}")
+                
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    if st.button("🔄 Reorder Spotify Playlist", type="primary"):
+                        try:
+                            with st.spinner("Reordering playlist on Spotify..."):
+                                # Get current playlist tracks
+                                playlist_data, current_tracks = get_playlist_tracks(
+                                    st.session_state.spotify_access_token, 
+                                    playlist_id
+                                )
+                                
+                                st.info(f"Found {len(current_tracks)} tracks in playlist: {playlist_data['name']}")
+                                
+                                # Calculate reorder operations
+                                operations = calculate_reorder_operations(current_tracks, sequence)
+                                
+                                if operations:
+                                    st.info(f"Executing {len(operations)} reorder operations...")
+                                    
+                                    # Apply reorder operations
+                                    new_snapshot = reorder_playlist_tracks(
+                                        st.session_state.spotify_access_token,
+                                        playlist_id,
+                                        operations
+                                    )
+                                    
+                                    st.success(f"✅ Successfully reordered playlist! New snapshot: {new_snapshot}")
+                                    st.balloons()
+                                else:
+                                    st.info("Playlist is already in the optimal harmonic order!")
+                                    
+                        except Exception as e:
+                            st.error(f"Failed to reorder playlist: {e}")
+                            st.info("Make sure you own the playlist or have collaborative access.")
+                
+                with col2:
+                    if st.button("🔓 Sign Out"):
+                        st.session_state.spotify_access_token = None
+                        st.session_state.code_verifier = None
+                        st.session_state.auth_state = None
+                        st.experimental_rerun()
+            else:
+                st.warning("No playlist ID found. Make sure you used Spotify → SongData input method.")
+        else:
+            st.warning("Please fetch a playlist using 'Spotify → SongData' method to enable reordering.")
+
+elif songs and not spotify_client_id:
+    st.info("Configure your Spotify Client ID above to enable playlist reordering.")
 st.markdown("---")
 st.markdown(
     "1.0.0\n"
