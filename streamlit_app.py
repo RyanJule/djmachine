@@ -1349,150 +1349,151 @@ st.header("🎵 Spotify Integration")
 # Set redirect URI based on environment:
 # - Local development: http://127.0.0.1:8501/ (localhost not allowed by Spotify)
 # - Production: https://your-app.streamlit.app/ (your actual deployed URL)
-SPOTIFY_CLIENT_ID = st.secrets.get("SPOTIFY_CLIENT_ID", "")
 
-# Determine redirect URI based on environment
-if 'localhost' in str(st._config.get_option('server.headless')):
-    # Production/deployed environment
-    REDIRECT_URI = "https://your-app.streamlit.app/"  # Replace with your actual deployment URL
-else:
-    # Local development
-    REDIRECT_URI = "http://127.0.0.1:8501/"
+SPOTIFY_CLIENT_ID = st.secrets.get("SPOTIFY_CLIENT_ID", "")
+REDIRECT_URI = st.secrets.get("REDIRECT_URI", "http://127.0.0.1:8501/")
 
 if not SPOTIFY_CLIENT_ID:
     st.warning("""
     **Spotify integration not configured.** 
-    
-    To enable playlist reordering, the app developer needs to:
-    1. Create a Spotify app at [developer.spotify.com](https://developer.spotify.com/dashboard)
-    2. Add the Client ID to the app's secrets
-    3. Configure redirect URIs in the Spotify app:
-       - Local development: `http://127.0.0.1:8501/`
-       - Production: `https://your-app.streamlit.app/` (replace with actual URL)
+    Add `SPOTIFY_CLIENT_ID` and `REDIRECT_URI` to Streamlit secrets.
+    Example secrets.toml:
+    SPOTIFY_CLIENT_ID = "your_client_id_here"
+    REDIRECT_URI = "http://127.0.0.1:8501/"
     """)
     spotify_client_id = None
 else:
     spotify_client_id = SPOTIFY_CLIENT_ID
     st.info("Spotify integration is available! Sign in below to reorder your playlists.")
 
-# Spotify authentication
+# Only show auth UI if we have a spotify client id
 if spotify_client_id and songs:
     st.markdown("### 🔐 Spotify Authentication")
-    
-    # Initialize session state for Spotify auth
-    if 'spotify_access_token' not in st.session_state:
-        st.session_state.spotify_access_token = None
-    if 'code_verifier' not in st.session_state:
-        st.session_state.code_verifier = None
-    if 'auth_state' not in st.session_state:
-        st.session_state.auth_state = None
-    
-    # Check for authorization code in URL parameters
-    query_params = st.query_params
-    
-    if 'code' in query_params and 'state' in query_params:
-        if (st.session_state.auth_state and 
-            query_params['state'] == st.session_state.auth_state and
-            st.session_state.code_verifier):
-            
-            try:
-                token_response = exchange_code_for_token(
-                    client_id=spotify_client_id,
-                    code=query_params['code'],
-                    redirect_uri=REDIRECT_URI,
-                    code_verifier=st.session_state.code_verifier
-                )
-                
-                st.session_state.spotify_access_token = token_response['access_token']
-                st.success("✅ Successfully authenticated with Spotify!")
-                
-                # Clear URL parameters
-                st.query_params.clear()
-                
-            except Exception as e:
-                st.error(f"Authentication failed: {e}")
-    
+    # ensure session keys
+    for key in ("spotify_access_token", "code_verifier", "auth_state"):
+        if key not in st.session_state:
+            st.session_state[key] = None
+
+    # Read query params (Streamlit returns lists)
+    params = st.experimental_get_query_params()
+    code = params.get("code", [None])[0]
+    state = params.get("state", [None])[0]
+
+    # Handle callback: exchange code for token
+    if code and state and st.session_state.get("auth_state") and state == st.session_state["auth_state"]:
+        try:
+            token_response = exchange_code_for_token(
+                client_id=spotify_client_id,
+                code=code,
+                redirect_uri=REDIRECT_URI,
+                code_verifier=st.session_state.get("code_verifier")
+            )
+            st.session_state.spotify_access_token = token_response.get("access_token")
+            st.success("✅ Successfully authenticated with Spotify!")
+            # clear params from URL (prevents re-processing)
+            st.experimental_set_query_params()
+        except Exception as e:
+            st.error(f"Authentication failed: {e}")
+
     if not st.session_state.spotify_access_token:
         st.info("Authenticate with Spotify to enable playlist reordering")
-        
         if st.button("🎵 Authenticate with Spotify"):
-            # Generate PKCE parameters
+            # Generate PKCE params
             code_verifier = generate_code_verifier()
             code_challenge = generate_code_challenge(code_verifier)
             auth_state = secrets.token_urlsafe(32)
-            
-            # Store in session state
             st.session_state.code_verifier = code_verifier
             st.session_state.auth_state = auth_state
-            
-            # Generate auth URL
+
             auth_url = get_spotify_auth_url(
                 client_id=spotify_client_id,
                 redirect_uri=REDIRECT_URI,
                 code_challenge=code_challenge,
                 state=auth_state
             )
-            
+            # Provide link (user clicks -> Spotify -> redirect back)
             st.markdown(f"[Click here to authenticate with Spotify]({auth_url})")
-            st.info("After authentication, you'll be redirected back to this page.")
-    
+            st.info("After authentication you'll be returned to this page. If your browser doesn't redirect, paste the full resulting URL into the app address bar and hit Enter.")
     else:
         st.success("✅ Authenticated with Spotify")
-        
-        # Extract playlist ID from original input
-        if songdata_input:
-            playlist_id = extract_spotify_playlist_id(songdata_input)
-            
-            if playlist_id and sequence:
-                st.markdown("### 🎯 Apply Harmonic Order to Spotify Playlist")
-                st.info(f"Playlist ID: {playlist_id}")
-                
-                col1, col2 = st.columns([1, 1])
-                
-                with col1:
-                    if st.button("🔄 Reorder Spotify Playlist", type="primary"):
-                        try:
-                            with st.spinner("Reordering playlist on Spotify..."):
-                                # Get current playlist tracks
-                                playlist_data, current_tracks = get_playlist_tracks(
-                                    st.session_state.spotify_access_token, 
-                                    playlist_id
-                                )
-                                
-                                st.info(f"Found {len(current_tracks)} tracks in playlist: {playlist_data['name']}")
-                                
-                                # Calculate reorder operations
-                                operations = calculate_reorder_operations(current_tracks, sequence)
-                                
-                                if operations:
-                                    st.info(f"Executing {len(operations)} reorder operations...")
-                                    
-                                    # Apply reorder operations
-                                    new_snapshot = reorder_playlist_tracks(
-                                        st.session_state.spotify_access_token,
-                                        playlist_id,
-                                        operations
-                                    )
-                                    
-                                    st.success(f"✅ Successfully reordered playlist! New snapshot: {new_snapshot}")
-                                    st.balloons()
-                                else:
-                                    st.info("Playlist is already in the optimal harmonic order!")
-                                    
-                        except Exception as e:
-                            st.error(f"Failed to reorder playlist: {e}")
-                            st.info("Make sure you own the playlist or have collaborative access.")
-                
-                with col2:
-                    if st.button("🔓 Sign Out"):
-                        st.session_state.spotify_access_token = None
-                        st.session_state.code_verifier = None
-                        st.session_state.auth_state = None
-                        st.experimental_rerun()
-            else:
-                st.warning("No playlist ID found. Make sure you used Spotify → SongData input method.")
+
+        # Extract playlist ID from original input (songdata_input)
+        playlist_id = extract_spotify_playlist_id(songdata_input) if songdata_input else None
+
+        if playlist_id and sequence:
+            st.markdown("### 🎯 Apply Harmonic Order to Spotify Playlist")
+            st.info(f"Playlist ID: {playlist_id}")
+
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if st.button("🔄 Reorder Spotify Playlist", type="primary"):
+                    try:
+                        with st.spinner("Fetching playlist from Spotify..."):
+                            playlist_data, current_tracks = get_playlist_tracks(
+                                st.session_state.spotify_access_token,
+                                playlist_id
+                            )
+                        st.info(f"Found {len(current_tracks)} tracks in playlist: {playlist_data.get('name')}")
+
+                        # New, more robust mapping: build map by track URI, fallback to normalized title/artist matching
+                        def normalize(s: str) -> str:
+                            return re.sub(r'\\s+', ' ', re.sub(r'[^\\w\\s]', '', (s or "").lower())).strip()
+
+                        # Build mapping from (normalized title, normalized primary artist) -> original index
+                        orig_map = {}
+                        uri_map = {}
+                        for idx, item in enumerate(current_tracks):
+                            track = item.get('track') or {}
+                            uri = track.get('uri')
+                            name = track.get('name') or ""
+                            artists = track.get('artists') or []
+                            primary_artist = artists[0].get('name') if artists and isinstance(artists[0], dict) else (artists[0] if artists else "")
+                            key = (normalize(name), normalize(primary_artist))
+                            # prefer first occurrence
+                            orig_map.setdefault(key, idx)
+                            if uri:
+                                uri_map.setdefault(uri, idx)
+
+                        # Prepare target_order as list of desired track-identifiers where possible
+                        target_positions = {}
+                        for target_idx, desired in enumerate(sequence):
+                            desired_key = (normalize(desired.title), normalize(desired.artist))
+                            if desired_key in orig_map:
+                                orig_idx = orig_map[desired_key]
+                                target_positions[orig_idx] = target_idx
+                            else:
+                                # attempt a looser partial-title match
+                                for ok, oi in orig_map.items():
+                                    if normalize(desired.title) in ok[0] or ok[0] in normalize(desired.title):
+                                        target_positions[oi] = target_idx
+                                        break
+
+                        # Compute operations using your existing algorithm (calculate_reorder_operations is expected to use current_tracks & sequence)
+                        operations = calculate_reorder_operations(current_tracks, sequence)
+                        if operations:
+                            st.info(f"Executing {len(operations)} reorder operations...")
+                            new_snapshot = reorder_playlist_tracks(
+                                st.session_state.spotify_access_token,
+                                playlist_id,
+                                operations
+                            )
+                            st.success(f"✅ Successfully reordered playlist! New snapshot: {new_snapshot}")
+                            st.balloons()
+                        else:
+                            st.info("Playlist is already in the optimal harmonic order (or no matching tracks found).")
+                    except Exception as e:
+                        st.error(f"Failed to reorder playlist: {e}")
+                        st.info("Make sure you own the playlist or have collaborative access, and that track names/artists match the sequence.")
+            with col2:
+                if st.button("🔓 Sign Out"):
+                    st.session_state.spotify_access_token = None
+                    st.session_state.code_verifier = None
+                    st.session_state.auth_state = None
+                    st.experimental_rerun()
         else:
-            st.warning("Please fetch a playlist using 'Spotify → SongData' method to enable reordering.")
+            st.warning("No playlist ID found. Make sure you used the 'Spotify → SongData' input method and that the Spotify URL/URI is valid.")
+elif songs and not spotify_client_id:
+    st.info("Configure your Spotify Client ID and REDIRECT_URI in Streamlit secrets to enable playlist reordering.")
 
 elif songs and not spotify_client_id:
     st.info("Configure your Spotify Client ID above to enable playlist reordering.")
