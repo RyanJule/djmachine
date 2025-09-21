@@ -1388,17 +1388,17 @@ if spotify_client_id and songs:
         st.session_state.auth_state = None
     
     # Check for authorization code in URL parameters
-    query_params = st.experimental_get_query_params()
+    query_params = st.query_params
     
     if 'code' in query_params and 'state' in query_params:
         if (st.session_state.auth_state and 
-            query_params['state'][0] == st.session_state.auth_state and
+            query_params['state'] == st.session_state.auth_state and
             st.session_state.code_verifier):
             
             try:
                 token_response = exchange_code_for_token(
                     client_id=spotify_client_id,
-                    code=query_params['code'][0],
+                    code=query_params['code'],
                     redirect_uri=REDIRECT_URI,
                     code_verifier=st.session_state.code_verifier
                 )
@@ -1407,7 +1407,7 @@ if spotify_client_id and songs:
                 st.success("✅ Successfully authenticated with Spotify!")
                 
                 # Clear URL parameters
-                st.experimental_set_query_params()
+                st.query_params.clear()
                 
             except Exception as e:
                 st.error(f"Authentication failed: {e}")
@@ -1496,9 +1496,3 @@ if spotify_client_id and songs:
 
 elif songs and not spotify_client_id:
     st.info("Configure your Spotify Client ID above to enable playlist reordering.")
-st.markdown("---")
-st.markdown(
-    "1.0.0\n"
-    "Thanks to songdata.io for playlist data.\n"
-    "Thanks to Mixed In Key for the Camelot system."
-)
