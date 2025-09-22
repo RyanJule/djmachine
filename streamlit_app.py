@@ -19,20 +19,21 @@ def _deserialize_songs(lst):
     except Exception:
         return lst
 
+
 def _process_oauth_callback_if_present(spotify_client_id, REDIRECT_URI, exchange_code_for_token):
     """
     Safely process OAuth callback from st.query_params.
     This extracts single-string 'code' and 'state' values (st.query_params returns lists),
     compares state, exchanges code for token, stores token in session_state,
-    clears query params in browser, and reruns the app.
+    clears query params in browser, and sets a session flag to indicate auth just completed.
     """
     try:
         query_params = st.query_params  # mapping of keys -> list of strings
     except Exception:
         return
 
-    code_from_qp = query_params.get('code', [None])[0]
-    state_from_qp = query_params.get('state', [None])[0]
+    code_from_qp = query_params.get('code', [None])[0] if query_params else None
+    state_from_qp = query_params.get('state', [None])[0] if query_params else None
 
     if code_from_qp and state_from_qp:
         # proceed only if we have saved auth_state and code_verifier
@@ -46,14 +47,24 @@ def _process_oauth_callback_if_present(spotify_client_id, REDIRECT_URI, exchange
                 )
                 access_token = token_response.get('access_token')
                 if access_token:
+                    # store token and mark that OAuth just completed for this session
                     st.session_state.spotify_access_token = access_token
-                    # Properly clear URL query params in the browser and rerun
-                    st.experimental_set_query_params()
-                    st.experimental_rerun()
+                    st.session_state._oauth_just_completed = True
+                    # Properly clear URL query params in the browser (do NOT force an immediate rerun here)
+                    try:
+                        st.experimental_set_query_params()
+                    except Exception:
+                        pass
             except Exception as e:
                 # Non-fatal: show error but continue
                 st.error(f"Authentication failed during callback processing: {e}")
+
 # --- End helpers ---
+
+# Initialize top-level variables
+songs = None
+sequence = None
+
 
 import pandas as pd
 import numpy as np
@@ -1340,12 +1351,30 @@ if input_mode == "Fetch from Spotify → SongData" and fetch_songdata_btn:
                     st.markdown(f"Try opening the SongData page directly: https://songdata.io/playlist/{pid}")
 
 # If no new fetch, try to use cached songs (for OAuth redirects)
-if not songs and st.session_state.cached_songs:
+if st.session_state.get('cached_songs') and (songs is None or (isinstance(songs, (list, tuple)) and len(songs) == 0)):
     songs = _deserialize_songs(st.session_state.cached_songs)
     if st.session_state.cached_songdata_input:
         songdata_input = st.session_state.cached_songdata_input
         # Show that we've restored cached data
         st.info(f"Restored {len(songs)} songs from cache")
+
+# If OAuth just completed in this session, or we already have a spotify token, ensure UI will render and allow playlist reordering.
+try:
+    if (st.session_state.get('_oauth_just_completed') or st.session_state.get('spotify_access_token')) and st.session_state.get('cached_songs'):
+        # ensure sequence and other cached pieces are restored so the UI displays as expected
+        if st.session_state.get('cached_sequence') and (sequence is None or (isinstance(sequence, (list, tuple)) and len(sequence) == 0)):
+            try:
+                sequence = _deserialize_songs(st.session_state.cached_sequence)
+            except Exception:
+                sequence = None
+        # mark that we've consumed the just-completed flag to avoid repeated messages
+        if st.session_state.get('_oauth_just_completed'):
+            st.session_state._oauth_just_completed = False
+            st.success("✅ Authentication completed and local playlist cache restored.")
+except Exception:
+    pass
+
+
 
 # Right column: results and analysis
 with right_col:
