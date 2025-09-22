@@ -1163,6 +1163,11 @@ with left_col:
     shuffle_flag = st.checkbox("Shuffle input order before sequencing", value=False, key="shuffle_checkbox")
     auto_bpm = st.checkbox("Attempt to fetch missing tempos (slow)", value=False, key="auto_bpm_checkbox")
     
+# Initialize session state for both auth and playlist data at the top level
+for key in ("spotify_access_token", "code_verifier", "auth_state", "cached_songs", "cached_songdata_input"):
+    if key not in st.session_state:
+        st.session_state[key] = None
+
 songs: List[Song] = []
 
 # Uploaded CSV
@@ -1251,6 +1256,10 @@ if input_mode == "Fetch from Spotify → SongData" and fetch_songdata_btn:
             try:
                 fetched_songs, sd_url, debug_info = fetch_songdata_playlist(songdata_input, timeout=sd_timeout, debug=sd_debug)
                 songs = fetched_songs
+                # Cache the results in session state
+                st.session_state.cached_songs = songs
+                st.session_state.cached_songdata_input = songdata_input
+                
                 st.success(f"Fetched {len(songs)} songs from SongData")
                 st.markdown(f"[Open SongData playlist page]({sd_url})")
                 if sd_debug:
@@ -1265,6 +1274,12 @@ if input_mode == "Fetch from Spotify → SongData" and fetch_songdata_btn:
                 pid = extract_spotify_playlist_id(songdata_input)
                 if pid:
                     st.markdown(f"Try opening the SongData page directly: https://songdata.io/playlist/{pid}")
+
+# If no new fetch, try to use cached songs (for OAuth redirects)
+if not songs and st.session_state.cached_songs:
+    songs = st.session_state.cached_songs
+    if st.session_state.cached_songdata_input:
+        songdata_input = st.session_state.cached_songdata_input
 
 # Right column: results and analysis
 with right_col:
@@ -1342,7 +1357,6 @@ with right_col:
         st.info("No songs loaded yet. Upload/paste songs or fetch a SongData playlist using the left panel.")
 
 # Replace the entire Spotify Integration section with this fixed version:
-
 st.markdown("---")
 st.header("🎵 Spotify Integration")
 
@@ -1371,6 +1385,7 @@ if spotify_client_id and songs:
     # Handle OAuth callback
     query_params = st.query_params
     if 'code' in query_params and 'state' in query_params:
+        # Note: st.query_params now returns strings directly, not lists
         if (st.session_state.auth_state and 
             query_params['state'] == st.session_state.auth_state and
             st.session_state.code_verifier):
