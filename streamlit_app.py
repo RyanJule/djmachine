@@ -1,5 +1,60 @@
 # streamlit_app.py
 import streamlit as st
+# --- Added helpers for robust OAuth and caching handling (inserted by assistant) ---
+def _ensure_session_keys(*keys):
+    for k in keys:
+        if k not in st.session_state:
+            st.session_state[k] = None
+
+def _serialize_songs(songs):
+    try:
+        return [s.__dict__ for s in songs]
+    except Exception:
+        # If already serializable or not dataclass-like, return as-is
+        return list(songs)
+
+def _deserialize_songs(lst):
+    try:
+        return [Song(**d) for d in lst]
+    except Exception:
+        return lst
+
+def _process_oauth_callback_if_present(spotify_client_id, REDIRECT_URI, exchange_code_for_token):
+    """
+    Safely process OAuth callback from st.query_params.
+    This extracts single-string 'code' and 'state' values (st.query_params returns lists),
+    compares state, exchanges code for token, stores token in session_state,
+    clears query params in browser, and reruns the app.
+    """
+    try:
+        query_params = st.query_params  # mapping of keys -> list of strings
+    except Exception:
+        return
+
+    code_from_qp = query_params.get('code', [None])[0]
+    state_from_qp = query_params.get('state', [None])[0]
+
+    if code_from_qp and state_from_qp:
+        # proceed only if we have saved auth_state and code_verifier
+        if st.session_state.get('auth_state') and state_from_qp == st.session_state.get('auth_state') and st.session_state.get('code_verifier'):
+            try:
+                token_response = exchange_code_for_token(
+                    client_id=spotify_client_id,
+                    code=code_from_qp,
+                    redirect_uri=REDIRECT_URI,
+                    code_verifier=st.session_state.get('code_verifier')
+                )
+                access_token = token_response.get('access_token')
+                if access_token:
+                    st.session_state.spotify_access_token = access_token
+                    # Properly clear URL query params in the browser and rerun
+                    st.experimental_set_query_params()
+                    st.experimental_rerun()
+            except Exception as e:
+                # Non-fatal: show error but continue
+                st.error(f"Authentication failed during callback processing: {e}")
+# --- End helpers ---
+
 import pandas as pd
 import numpy as np
 import requests
@@ -1080,6 +1135,12 @@ def calculate_reorder_operations(original_tracks: list, target_order: list):
 # Streamlit UI
 # -----------------------
 
+
+# Process OAuth callback safely (added by assistant)
+try:
+    _process_oauth_callback_if_present(spotify_client_id, REDIRECT_URI, exchange_code_for_token)
+except Exception:
+    pass
 st.title("Harmonic Song Analyzer - Leverages songdata.io and Camelot System for Harmonic Mixing")
 st.markdown("Paste the share link for your spotify playlist in order to build a harmonic play order, and get bridge-key suggestions.")
 
@@ -1164,7 +1225,7 @@ with left_col:
     auto_bpm = st.checkbox("Attempt to fetch missing tempos (slow)", value=False, key="auto_bpm_checkbox")
     
 # Initialize session state for both auth and playlist data at the top level
-for key in ("spotify_access_token", "code_verifier", "auth_state", "cached_songs", "cached_songdata_input"):
+for key in ("spotify_access_token", "code_verifier", "auth_state", "cached_songs", "cached_songdata_input", "cached_sequence"):
     if key not in st.session_state:
         st.session_state[key] = None
 
@@ -1260,7 +1321,7 @@ if input_mode == "Fetch from Spotify → SongData" and fetch_songdata_btn:
                 fetched_songs, sd_url, debug_info = fetch_songdata_playlist(songdata_input, timeout=sd_timeout, debug=sd_debug)
                 songs = fetched_songs
                 # Cache the results in session state
-                st.session_state.cached_songs = songs
+                st.session_state.cached_songs = _serialize_songs(songs)
                 st.session_state.cached_songdata_input = songdata_input
                 
                 st.success(f"Fetched {len(songs)} songs from SongData")
@@ -1280,7 +1341,7 @@ if input_mode == "Fetch from Spotify → SongData" and fetch_songdata_btn:
 
 # If no new fetch, try to use cached songs (for OAuth redirects)
 if not songs and st.session_state.cached_songs:
-    songs = st.session_state.cached_songs
+    songs = _deserialize_songs(st.session_state.cached_songs)
     if st.session_state.cached_songdata_input:
         songdata_input = st.session_state.cached_songdata_input
         # Show that we've restored cached data
@@ -1314,7 +1375,7 @@ with right_col:
         gaps_and_bridges = analysis['gaps_and_bridges']
         
         # Cache the sequence in session state for OAuth redirects
-        st.session_state.cached_sequence = sequence
+        st.session_state.cached_sequence = _serialize_songs(sequence)
 
         st.header("Recommended Play Order")
         rows = []
