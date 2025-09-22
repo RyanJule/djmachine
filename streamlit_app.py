@@ -1171,11 +1171,6 @@ for key in ("spotify_access_token", "code_verifier", "auth_state", "cached_songs
 # Move the session state initialization to the very top, right after the data loading sections
 # This needs to happen BEFORE any session state access
 
-# Initialize session state for both auth and playlist data at the top level
-for key in ("spotify_access_token", "code_verifier", "auth_state", "cached_songs", "cached_songdata_input"):
-    if key not in st.session_state:
-        st.session_state[key] = None
-
 songs: List[Song] = []
 
 # Uploaded CSV
@@ -1317,6 +1312,9 @@ with right_col:
         sequence = analysis['sequence']
         mixing_pairs = analysis['mixing_pairs']
         gaps_and_bridges = analysis['gaps_and_bridges']
+        
+        # Cache the sequence in session state for OAuth redirects
+        st.session_state.cached_sequence = sequence
 
         st.header("Recommended Play Order")
         rows = []
@@ -1387,14 +1385,13 @@ else:
     spotify_client_id = SPOTIFY_CLIENT_ID
     st.info("Spotify integration is available! Sign in below to reorder your playlists.")
 
-# Only show auth UI if we have a spotify client id and songs
-if spotify_client_id and songs:
+# Show Spotify integration if we have songs (current or cached)
+if spotify_client_id and (songs or st.session_state.cached_songs):
     st.markdown("### 🔐 Spotify Authentication")
     
     # Handle OAuth callback
     query_params = st.query_params
     if 'code' in query_params and 'state' in query_params:
-        # Note: st.query_params now returns strings directly, not lists
         if (st.session_state.auth_state and 
             query_params['state'] == st.session_state.auth_state and
             st.session_state.code_verifier):
@@ -1412,7 +1409,6 @@ if spotify_client_id and songs:
                 
                 # Clear URL parameters to prevent reprocessing
                 st.query_params.clear()
-                # Don't rerun here - let the app continue with the current state
                 
             except Exception as e:
                 st.error(f"Authentication failed: {e}")
@@ -1448,7 +1444,10 @@ if spotify_client_id and songs:
         current_input = songdata_input or st.session_state.cached_songdata_input
         playlist_id = extract_spotify_playlist_id(current_input) if current_input else None
         
-        if playlist_id and 'sequence' in locals() and sequence:
+        # Use cached sequence if current sequence doesn't exist
+        current_sequence = locals().get('sequence') or st.session_state.cached_sequence
+        
+        if playlist_id and current_sequence:
             st.markdown("### 🎯 Apply Harmonic Order to Spotify Playlist")
             st.info(f"Playlist ID: {playlist_id}")
             
@@ -1466,8 +1465,8 @@ if spotify_client_id and songs:
                             
                             st.info(f"Found {len(current_tracks)} tracks in playlist: {playlist_data['name']}")
                             
-                            # Calculate reorder operations
-                            operations = calculate_reorder_operations(current_tracks, sequence)
+                            # Calculate reorder operations using the current sequence
+                            operations = calculate_reorder_operations(current_tracks, current_sequence)
                             
                             if operations:
                                 st.info(f"Executing {len(operations)} reorder operations...")
@@ -1497,12 +1496,19 @@ if spotify_client_id and songs:
         else:
             if not current_input:
                 st.warning("No playlist ID found. Make sure you used Spotify → SongData input method.")
-            elif not ('sequence' in locals() and sequence):
-                st.warning("No harmonic sequence available. Please wait for analysis to complete.")
+            elif not current_sequence:
+                st.warning("No harmonic sequence available. Please analyze a playlist first.")
             else:
                 st.warning("Playlist data not available.")
 else:
-    if songs and not spotify_client_id:
+    if (songs or st.session_state.cached_songs) and not spotify_client_id:
         st.info("Configure your Spotify Client ID and REDIRECT_URI in Streamlit secrets to enable playlist reordering.")
-    elif not songs:
+    elif not (songs or st.session_state.cached_songs):
         st.info("Fetch a playlist first to enable Spotify integration.")
+
+st.markdown("---")
+st.markdown(
+    "1.0.0\n"
+    "Thanks to songdata.io for playlist data.\n"
+    "Thanks to Mixed In Key for the Camelot system."
+)
