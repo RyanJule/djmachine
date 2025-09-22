@@ -20,12 +20,14 @@ def _deserialize_songs(lst):
         return lst
 
 
+
 def _process_oauth_callback_if_present(spotify_client_id, REDIRECT_URI, exchange_code_for_token):
     """
     Safely process OAuth callback from st.query_params.
     This extracts single-string 'code' and 'state' values (st.query_params returns lists),
     compares state, exchanges code for token, stores token in session_state,
-    clears query params in browser, and sets a session flag to indicate auth just completed.
+    sets a session flag to indicate auth just completed, clears query params,
+    and triggers a controlled rerun so the UI will re-read session_state and render the cached playlist.
     """
     try:
         query_params = st.query_params  # mapping of keys -> list of strings
@@ -50,9 +52,14 @@ def _process_oauth_callback_if_present(spotify_client_id, REDIRECT_URI, exchange
                     # store token and mark that OAuth just completed for this session
                     st.session_state.spotify_access_token = access_token
                     st.session_state._oauth_just_completed = True
-                    # Properly clear URL query params in the browser (do NOT force an immediate rerun here)
+                    # Properly clear URL query params in the browser
                     try:
                         st.experimental_set_query_params()
+                    except Exception:
+                        pass
+                    # Rerun so the main flow will pick up session_state changes and render UI
+                    try:
+                        st.experimental_rerun()
                     except Exception:
                         pass
             except Exception as e:
@@ -60,6 +67,55 @@ def _process_oauth_callback_if_present(spotify_client_id, REDIRECT_URI, exchange
                 st.error(f"Authentication failed during callback processing: {e}")
 
 # --- End helpers ---
+
+
+# --- UI state restoration helpers (added by assistant) ---
+def restore_ui_state_from_session():
+    """
+    Populate st.session_state.render_songs and st.session_state.render_sequence
+    from cached_songs/cached_sequence after OAuth or on app start.
+    This ensures the main UI reads from session_state and will render the table
+    and enable rearrangement controls when appropriate.
+    """
+    try:
+        # ensure keys exist
+        if 'render_songs' not in st.session_state:
+            st.session_state['render_songs'] = None
+        if 'render_sequence' not in st.session_state:
+            st.session_state['render_sequence'] = None
+        # If we already have render_songs, keep them.
+        if st.session_state.get('render_songs'):
+            return
+
+        # Prefer cached_songs if present
+        if st.session_state.get('cached_songs'):
+            try:
+                st.session_state['render_songs'] = _deserialize_songs(st.session_state['cached_songs'])
+            except Exception:
+                st.session_state['render_songs'] = st.session_state['cached_songs']
+
+        # If OAuth just completed, also restore sequence (if available)
+        if st.session_state.get('_oauth_just_completed') or st.session_state.get('spotify_access_token'):
+            if st.session_state.get('cached_sequence'):
+                try:
+                    st.session_state['render_sequence'] = _deserialize_songs(st.session_state['cached_sequence'])
+                except Exception:
+                    st.session_state['render_sequence'] = st.session_state['cached_sequence']
+            # consume the flag so this runs only once after redirect
+            if st.session_state.get('_oauth_just_completed'):
+                st.session_state['_oauth_just_completed'] = False
+    except Exception:
+        # Non-fatal: ignore restoration failures to avoid breaking the app
+        pass
+
+
+# Call restore early so UI uses session-based render_songs
+try:
+    restore_ui_state_from_session()
+except Exception:
+    pass
+# --- end restoration helpers ---
+
 
 # Initialize top-level variables
 songs = None
