@@ -57,7 +57,7 @@ def _process_oauth_callback_if_present(spotify_client_id, REDIRECT_URI, exchange
                         st.experimental_set_query_params()
                     except Exception:
                         pass
-                    # Rerun so the main flow will pick up session_state changes and render UI
+                    # Rerun so the main flow will pick up session_state changes and render the cached playlist.
                     try:
                         st.experimental_rerun()
                     except Exception:
@@ -1290,6 +1290,9 @@ with left_col:
     st.header("Options")
     shuffle_flag = st.checkbox("Shuffle input order before sequencing", value=False, key="shuffle_checkbox")
     auto_bpm = st.checkbox("Attempt to fetch missing tempos (slow)", value=False, key="auto_bpm_checkbox")
+
+    # NEW: Sorting mode selectbox (Key / Tempo / Key + Tempo)
+    sort_mode = st.selectbox("Arrange setlist by:", ["Key", "Tempo", "Key + Tempo"], index=0, key="sort_mode_select")
     
 # Initialize session state for both auth and playlist data at the top level
 for key in ("spotify_access_token", "code_verifier", "auth_state", "cached_songs", "cached_songdata_input", "cached_sequence"):
@@ -1454,12 +1457,89 @@ with right_col:
             if not s.camelot:
                 s.camelot = hs.key_to_camelot(s.key)
 
+        # Base harmonic analysis (uses Camelot sequencing)
         analysis = hs.analyze_song_collection(songs, available_keys=[s.key for s in songs])
-        sequence = analysis['sequence']
-        mixing_pairs = analysis['mixing_pairs']
-        gaps_and_bridges = analysis['gaps_and_bridges']
-        
-        # Cache the sequence in session state for OAuth redirects
+        base_sequence = analysis['sequence']  # harmonic sequence as originally computed
+
+        # ---------- NEW: Respect user's sort_mode selection ----------
+        # sort_mode options: "Key", "Tempo", "Key + Tempo"
+        arranged_sequence = None
+
+        if sort_mode == "Key":
+            # Use harmonic sequencing produced by the analyzer
+            arranged_sequence = base_sequence
+
+        elif sort_mode == "Tempo":
+            # Sort all songs primarily by tempo ascending. Missing tempos go to the end.
+            # Tie-breaker: keep harmonic order for same tempo where possible.
+            # We'll build a mapping from song (title+artist) -> base index to keep stable tie-breaking.
+            base_index_map = { (s.title, s.artist): i for i, s in enumerate(base_sequence) }
+            # Use songs (not base_sequence) to ensure songs not in base_sequence (if any) are included.
+            def tempo_key(s: Song):
+                t = s.tempo if (s.tempo is not None and not (isinstance(s.tempo, float) and np.isnan(s.tempo))) else 10**9
+                tie = base_index_map.get((s.title, s.artist), 10**9)
+                return (t, tie)
+            arranged_sequence = sorted(songs, key=tempo_key)
+
+        else:  # "Key + Tempo"
+            # We preserve the harmonic group order (the order of camelot groups in base_sequence)
+            # then sort songs within each camelot group by tempo ascending. Unkeyed songs come last sorted by tempo.
+            group_order = []
+            groups = {}
+            unkeyed = []
+            for s in base_sequence:
+                cam = hs.key_to_camelot(s.key)
+                if cam:
+                    if cam not in groups:
+                        groups[cam] = []
+                        group_order.append(cam)
+                    groups[cam].append(s)
+                else:
+                    unkeyed.append(s)
+            # Songs present in original `songs` but not in base_sequence should also be included:
+            # add any missing songs to appropriate groups or unkeyed list
+            seen = set((s.title, s.artist) for s in base_sequence)
+            for s in songs:
+                if (s.title, s.artist) in seen:
+                    continue
+                cam = hs.key_to_camelot(s.key)
+                if cam:
+                    if cam not in groups:
+                        groups[cam] = []
+                        group_order.append(cam)
+                    groups[cam].append(s)
+                else:
+                    unkeyed.append(s)
+
+            # helper: tempo-safe comparator
+            def tempo_val(s: Song):
+                return s.tempo if (s.tempo is not None and not (isinstance(s.tempo, float) and np.isnan(s.tempo))) else 10**9
+
+            arranged_sequence = []
+            for cam in group_order:
+                group_songs = groups.get(cam, [])
+                # sort group by tempo ascending (None last)
+                group_songs_sorted = sorted(group_songs, key=lambda ss: (tempo_val(ss)))
+                arranged_sequence.extend(group_songs_sorted)
+            # finally append unkeyed songs, sorted by tempo
+            arranged_sequence.extend(sorted(unkeyed, key=lambda ss: tempo_val(ss)))
+
+        # Use arranged_sequence from here on for tables, mixing pairs, gap analysis, and caching
+        sequence = arranged_sequence
+        mixing_pairs = hs.find_mixing_pairs(sequence)
+
+        # Build gaps and bridge suggestions based on arranged sequence
+        gaps_and_bridges = []
+        existing_keys = [s.key for s in songs]
+        for i in range(len(sequence) - 1):
+            a = sequence[i]
+            b = sequence[i + 1]
+            score = hs._distance_score(a.key, b.key)
+            if score < 0.6:
+                suggestions = hs.suggest_bridge_keys(a.key, b.key, available_keys=existing_keys)
+                gaps_and_bridges.append({'from': a, 'to': b, 'score': score, 'suggestions': suggestions})
+
+        # Cache the sequence in session state for OAuth redirects (serialize arranged order)
         st.session_state.cached_sequence = _serialize_songs(sequence)
 
         st.header("Recommended Play Order")
@@ -1470,7 +1550,8 @@ with right_col:
                 'Order': i + 1,
                 'Title': s.title,
                 'Artist': s.artist,
-                'Camelot': camelot_display
+                'Camelot': camelot_display,
+                'Tempo': s.tempo
             })
         df_out = pd.DataFrame(rows)
         st.dataframe(df_out)
