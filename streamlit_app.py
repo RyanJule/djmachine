@@ -1481,9 +1481,8 @@ with right_col:
                 return (t, tie)
             arranged_sequence = sorted(songs, key=tempo_key)
 
-        else:  # "Key + Tempo"
-            # We preserve the harmonic group order (the order of camelot groups in base_sequence)
-            # then sort songs within each camelot group by tempo ascending. Unkeyed songs come last sorted by tempo.
+        else:  # "Key + Tempo" → tempo-smoothed harmonic sequence
+    # 1. Group songs by Camelot key from the harmonic sequence
             group_order = []
             groups = {}
             unkeyed = []
@@ -1496,8 +1495,8 @@ with right_col:
                     groups[cam].append(s)
                 else:
                     unkeyed.append(s)
-            # Songs present in original `songs` but not in base_sequence should also be included:
-            # add any missing songs to appropriate groups or unkeyed list
+
+            # Add any songs not in base_sequence
             seen = set((s.title, s.artist) for s in base_sequence)
             for s in songs:
                 if (s.title, s.artist) in seen:
@@ -1511,18 +1510,56 @@ with right_col:
                 else:
                     unkeyed.append(s)
 
-            # helper: tempo-safe comparator
+            # Helper for safe tempo access
             def tempo_val(s: Song):
-                return s.tempo if (s.tempo is not None and not (isinstance(s.tempo, float) and np.isnan(s.tempo))) else 10**9
+                t = s.tempo
+                return float(t) if (t is not None and not (isinstance(t, float) and np.isnan(t))) else None
 
+            # 2. Sort each group by tempo ascending (missing tempos last)
+            for cam in groups:
+                groups[cam] = sorted(groups[cam], key=lambda s: (tempo_val(s) is None, tempo_val(s) or 0))
+
+            # 3. Greedily choose group orientation (normal or reversed)
             arranged_sequence = []
-            for cam in group_order:
-                group_songs = groups.get(cam, [])
-                # sort group by tempo ascending (None last)
-                group_songs_sorted = sorted(group_songs, key=lambda ss: (tempo_val(ss)))
-                arranged_sequence.extend(group_songs_sorted)
-            # finally append unkeyed songs, sorted by tempo
-            arranged_sequence.extend(sorted(unkeyed, key=lambda ss: tempo_val(ss)))
+            last_tempo = None
+
+            for i, cam in enumerate(group_order):
+                group = groups[cam]
+                if not arranged_sequence:
+                    # First group → keep as-is
+                    arranged_sequence.extend(group)
+                    last_tempo = tempo_val(arranged_sequence[-1])
+                    continue
+
+                if not group:
+                    continue
+
+                # Compute jump if we keep or reverse
+                first_t = tempo_val(group[0])
+                last_t = tempo_val(group[-1])
+                if last_tempo is None:
+                    # No prior tempo, just keep normal order
+                    arranged_sequence.extend(group)
+                    last_tempo = tempo_val(arranged_sequence[-1])
+                    continue
+
+                # Calculate tempo jumps to previous group's end
+                jump_keep = abs((first_t or last_tempo) - last_tempo) if first_t is not None else 999
+                jump_reverse = abs((last_t or last_tempo) - last_tempo) if last_t is not None else 999
+
+                # Choose orientation minimizing tempo jump
+                if jump_reverse < jump_keep:
+                    group = list(reversed(group))
+
+                arranged_sequence.extend(group)
+                # Update last tempo (skip None)
+                last_t = tempo_val(arranged_sequence[-1])
+                if last_t is not None:
+                    last_tempo = last_t
+
+            # 4. Append unkeyed songs (tempo ascending)
+            unkeyed_sorted = sorted(unkeyed, key=lambda s: (tempo_val(s) is None, tempo_val(s) or 0))
+            arranged_sequence.extend(unkeyed_sorted)
 
         # Use arranged_sequence from here on for tables, mixing pairs, gap analysis, and caching
         sequence = arranged_sequence
