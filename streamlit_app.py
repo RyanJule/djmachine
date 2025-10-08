@@ -1466,23 +1466,14 @@ with right_col:
         arranged_sequence = None
 
         if sort_mode == "Key":
-            # Use harmonic sequencing produced by the analyzer
-            arranged_sequence = base_sequence
+            arranged = hs.create_harmonic_sequence(songs)
 
         elif sort_mode == "Tempo":
-            # Sort all songs primarily by tempo ascending. Missing tempos go to the end.
-            # Tie-breaker: keep harmonic order for same tempo where possible.
-            # We'll build a mapping from song (title+artist) -> base index to keep stable tie-breaking.
-            base_index_map = { (s.title, s.artist): i for i, s in enumerate(base_sequence) }
-            # Use songs (not base_sequence) to ensure songs not in base_sequence (if any) are included.
-            def tempo_key(s: Song):
-                t = s.tempo if (s.tempo is not None and not (isinstance(s.tempo, float) and np.isnan(s.tempo))) else 10**9
-                tie = base_index_map.get((s.title, s.artist), 10**9)
-                return (t, tie)
-            arranged_sequence = sorted(songs, key=tempo_key)
+            arranged = sorted(songs, key=lambda s: (s.tempo or 0))
 
-        else:  # "Key + Tempo" → tempo-smoothed harmonic sequence
-    # 1. Group songs by Camelot key from the harmonic sequence
+        elif sort_mode == "Key + Tempo":
+            # Existing harmonic-first logic with local tempo smoothing
+            base_sequence = hs.create_harmonic_sequence(songs)
             group_order = []
             groups = {}
             unkeyed = []
@@ -1496,85 +1487,122 @@ with right_col:
                 else:
                     unkeyed.append(s)
 
-            # Add any songs not in base_sequence
-            seen = set((s.title, s.artist) for s in base_sequence)
-            for s in songs:
-                if (s.title, s.artist) in seen:
-                    continue
-                cam = hs.key_to_camelot(s.key)
-                if cam:
-                    if cam not in groups:
-                        groups[cam] = []
-                        group_order.append(cam)
-                    groups[cam].append(s)
-                else:
-                    unkeyed.append(s)
-
-            # Helper for safe tempo access
             def tempo_val(s: Song):
                 t = s.tempo
                 return float(t) if (t is not None and not (isinstance(t, float) and np.isnan(t))) else None
 
-            # 2. Sort each group by tempo ascending (missing tempos last)
             for cam in groups:
                 groups[cam] = sorted(groups[cam], key=lambda s: (tempo_val(s) is None, tempo_val(s) or 0))
 
-            # 3. Greedily choose group orientation (normal or reversed)
             arranged_sequence = []
             last_tempo = None
-
-            for i, cam in enumerate(group_order):
+            for cam in group_order:
                 group = groups[cam]
                 if not arranged_sequence:
-                    # First group → keep as-is
                     arranged_sequence.extend(group)
                     last_tempo = tempo_val(arranged_sequence[-1])
                     continue
 
-                if not group:
-                    continue
-
-                # Compute jump if we keep or reverse
                 first_t = tempo_val(group[0])
                 last_t = tempo_val(group[-1])
                 if last_tempo is None:
-                    # No prior tempo, just keep normal order
                     arranged_sequence.extend(group)
                     last_tempo = tempo_val(arranged_sequence[-1])
                     continue
 
-                # Calculate tempo jumps to previous group's end
                 jump_keep = abs((first_t or last_tempo) - last_tempo) if first_t is not None else 999
                 jump_reverse = abs((last_t or last_tempo) - last_tempo) if last_t is not None else 999
 
-                # Choose orientation minimizing tempo jump
                 if jump_reverse < jump_keep:
                     group = list(reversed(group))
 
                 arranged_sequence.extend(group)
-                # Update last tempo (skip None)
                 last_t = tempo_val(arranged_sequence[-1])
                 if last_t is not None:
                     last_tempo = last_t
+            arranged = arranged_sequence + sorted(unkeyed, key=lambda s: (tempo_val(s) is None, tempo_val(s) or 0))
 
-            # 4. Append unkeyed songs (tempo ascending)
-            unkeyed_sorted = sorted(unkeyed, key=lambda s: (tempo_val(s) is None, tempo_val(s) or 0))
-            arranged_sequence.extend(unkeyed_sorted)
+        elif sort_mode == "Tempo + Key (Bridged)":
+            # Tempo-first harmonic arrangement with bridge suggestions
+            songs_with_key = [s for s in songs if hs.key_to_camelot(s.key)]
+            unkeyed = [s for s in songs if not hs.key_to_camelot(s.key)]
 
-        # Use arranged_sequence from here on for tables, mixing pairs, gap analysis, and caching
-        sequence = arranged_sequence
-        mixing_pairs = hs.find_mixing_pairs(sequence)
+            def tempo_val(s):
+                return s.tempo if s.tempo not in (None, np.nan) else None
 
-        # Build gaps and bridge suggestions based on arranged sequence
-        gaps_and_bridges = []
-        existing_keys = [s.key for s in songs]
-        for i in range(len(sequence) - 1):
-            a = sequence[i]
-            b = sequence[i + 1]
-            score = hs._distance_score(a.key, b.key)
-            if score < 0.6:
-                suggestions = hs.suggest_bridge_keys(a.key, b.key, available_keys=existing_keys)
-                gaps_and_bridges.append({'from': a, 'to': b, 'score': score, 'suggestions': suggestions})
+            # Define harmonic adjacency: same number ±1, same A/B, or A↔B with same number
+            def is_harmonically_compatible(k1, k2):
+                if not k1 or not k2:
+                    return False
+                m1 = re.match(r"(\\d{1,2})([AB])", k1)
+                m2 = re.match(r"(\\d{1,2})([AB])", k2)
+                if not m1 or not m2:
+                    return False
+                n1, l1 = int(m1.group(1)), m1.group(2)
+                n2, l2 = int(m2.group(1)), m2.group(2)
+                if n1 == n2 and l1 != l2:
+                    return True
+                if abs(n1 - n2) == 1 and l1 == l2:
+                    return True
+                if (n1 == 1 and n2 == 12 or n1 == 12 and n2 == 1) and l1 == l2:
+                    return True
+                return False
+
+            def transition_cost(a, b):
+                tempo_gap = abs((tempo_val(a) or 0) - (tempo_val(b) or 0))
+                harmonic_penalty = 0 if is_harmonically_compatible(hs.key_to_camelot(a.key), hs.key_to_camelot(b.key)) else 50
+                return tempo_gap + harmonic_penalty
+
+            remaining = songs_with_key[:]
+            arranged_sequence = []
+
+            # Start from song closest to median tempo
+            valid_tempos = [tempo_val(s) for s in remaining if tempo_val(s) is not None]
+            start_index = 0
+            if valid_tempos:
+                median_tempo = np.median(valid_tempos)
+                start_index = int(np.argmin([abs((tempo_val(s) or median_tempo) - median_tempo) for s in remaining]))
+            arranged_sequence.append(remaining.pop(start_index))
+
+            while remaining:
+                last = arranged_sequence[-1]
+                next_song = min(remaining, key=lambda s: transition_cost(last, s))
+                arranged_sequence.append(next_song)
+                remaining.remove(next_song)
+
+            arranged = arranged_sequence + sorted(unkeyed, key=lambda s: tempo_val(s) or 0)
+
+            # Suggest bridge songs for large gaps
+            bridge_suggestions = []
+            for i in range(len(arranged) - 1):
+                a, b = arranged[i], arranged[i + 1]
+                tempo_gap = abs((tempo_val(a) or 0) - (tempo_val(b) or 0))
+                a_key = hs.key_to_camelot(a.key)
+                b_key = hs.key_to_camelot(b.key)
+                if not is_harmonically_compatible(a_key, b_key) or tempo_gap > 15:
+                    bridge_keys = []
+                    if a_key and b_key:
+                        a_num, a_mode = int(a_key[:-1]), a_key[-1]
+                        b_num, b_mode = int(b_key[:-1]), b_key[-1]
+                        neighbor_keys = [f"{(a_num + 1 - 1) % 12 + 1}{a_mode}", f"{(a_num - 1 - 1) % 12 + 1}{a_mode}", f"{a_num}{'B' if a_mode == 'A' else 'A'}"]
+                        bridge_keys = [k for k in neighbor_keys if is_harmonically_compatible(k, b_key)]
+                        bridge_suggestions.append({
+                            "From → To": f"{a.title} → {b.title}",
+                            "Tempo Gap (BPM)": tempo_gap,
+                            "Suggested Bridge Key(s)": ", ".join(bridge_keys) or "None",
+                            "Ideal Bridge Tempo (BPM)": round(((tempo_val(a) or 0) + (tempo_val(b) or 0)) / 2)
+                        })
+    
+                        
+            
+                    # --- Display results ---
+                    st.subheader(f"Arranged by {sort_mode}")
+                    rows = [
+                        {"Order": i+1, "Title": s.title, "Artist": s.artist, "Key": s.key, "Tempo": s.tempo}
+                        for i, s in enumerate(arranged)
+                    ]
+                    st.dataframe(pd.DataFrame(rows))
+                    st.success(f"Arranged {len(arranged)} songs by {sort_mode}.")
 
         # Cache the sequence in session state for OAuth redirects (serialize arranged order)
         st.session_state.cached_sequence = _serialize_songs(sequence)
@@ -1602,22 +1630,11 @@ with right_col:
             mp_rows.append({'From': f"{a.title} — {a.artist} {a_disp}", 'To': f"{b.title} — {b.artist} {b_disp}", 'Score': round(sc, 2)})
         st.table(pd.DataFrame(mp_rows))
 
-        if gaps_and_bridges:
-            st.header("Harmonic Gaps & Bridge Suggestions")
-            for gb in gaps_and_bridges:
-                a = gb['from']; b = gb['to']
-                a_disp = hs.camelot_to_display(a.camelot) if a.camelot else a.key
-                b_disp = hs.camelot_to_display(b.camelot) if b.camelot else b.key
-                st.subheader(f"{a.title} — {a_disp} → {b.title} — {b_disp}  (score {gb['score']:.2f})")
-                st.write("Bridge suggestions:")
-                if gb['suggestions']:
-                    for s in gb['suggestions']:
-                        st.write(f"- {s}")
-                else:
-                    st.write("- (no suggestions found)")
-                st.write("---")
+        if bridge_suggestions:
+                            st.subheader("🔀 Suggested Bridge Key + Tempo Combinations")
+                            st.dataframe(pd.DataFrame(bridge_suggestions))
         else:
-            st.success("No major harmonic gaps detected — your order flows well!")
+            st.success("No major harmonic gaps detected in the sequence!")
 
         if st.checkbox("Show normalized key mapping (debug)", value=False):
             mapping = []
@@ -1627,148 +1644,6 @@ with right_col:
 
     else:
         st.info("No songs loaded yet. Upload/paste songs or fetch a SongData playlist using the left panel.")
-
-st.markdown("---")
-st.header("🎵 Spotify Integration")
-
-SPOTIFY_CLIENT_ID = st.secrets.get("SPOTIFY_CLIENT_ID", "")
-REDIRECT_URI = st.secrets.get("REDIRECT_URI", "http://127.0.0.1:8501/")
-
-if not SPOTIFY_CLIENT_ID:
-    st.warning("""
-    **Spotify integration not configured.** 
-    Add `SPOTIFY_CLIENT_ID` and `REDIRECT_URI` to Streamlit secrets.
-    Example secrets.toml:
-    ```
-    SPOTIFY_CLIENT_ID = "your_client_id_here"
-    REDIRECT_URI = "http://127.0.0.1:8501/"
-    ```
-    """)
-    spotify_client_id = None
-else:
-    spotify_client_id = SPOTIFY_CLIENT_ID
-    st.info("Spotify integration is available! Sign in below to reorder your playlists.")
-
-# Show Spotify integration if we have songs (current or cached)
-if spotify_client_id and (songs or st.session_state.cached_songs):
-    st.markdown("### 🔐 Spotify Authentication")
-    
-    # Handle OAuth callback
-    query_params = st.query_params
-    if 'code' in query_params and 'state' in query_params:
-        if (st.session_state.auth_state and 
-            query_params['state'] == st.session_state.auth_state and
-            st.session_state.code_verifier):
-            
-            try:
-                token_response = exchange_code_for_token(
-                    client_id=spotify_client_id,
-                    code=query_params['code'],
-                    redirect_uri=REDIRECT_URI,
-                    code_verifier=st.session_state.code_verifier
-                )
-                
-                st.session_state.spotify_access_token = token_response['access_token']
-                st.success("✅ Successfully authenticated with Spotify!")
-                
-                # Clear URL parameters to prevent reprocessing
-                st.query_params.clear()
-                
-            except Exception as e:
-                st.error(f"Authentication failed: {e}")
-
-    if not st.session_state.spotify_access_token:
-        st.info("Authenticate with Spotify to enable playlist reordering")
-        
-        if st.button("🎵 Authenticate with Spotify"):
-            # Generate PKCE parameters
-            code_verifier = generate_code_verifier()
-            code_challenge = generate_code_challenge(code_verifier)
-            auth_state = secrets.token_urlsafe(32)
-            
-            # Store in session state
-            st.session_state.code_verifier = code_verifier
-            st.session_state.auth_state = auth_state
-            
-            # Generate auth URL
-            auth_url = get_spotify_auth_url(
-                client_id=spotify_client_id,
-                redirect_uri=REDIRECT_URI,
-                code_challenge=code_challenge,
-                state=auth_state
-            )
-            
-            st.markdown(f"[Click here to authenticate with Spotify]({auth_url})")
-            st.info("After authentication, you'll be redirected back to this page.")
-    
-    else:
-        st.success("✅ Authenticated with Spotify")
-        
-        # Extract playlist ID from cached or current input
-        current_input = songdata_input or st.session_state.cached_songdata_input
-        playlist_id = extract_spotify_playlist_id(current_input) if current_input else None
-        
-        # Use cached sequence if current sequence doesn't exist
-        current_sequence = locals().get('sequence') or st.session_state.cached_sequence
-        
-        if playlist_id and current_sequence:
-            st.markdown("### 🎯 Apply Harmonic Order to Spotify Playlist")
-            st.info(f"Playlist ID: {playlist_id}")
-            
-            col1, col2 = st.columns([1, 1])
-            
-            with col1:
-                if st.button("🔄 Reorder Spotify Playlist", type="primary"):
-                    try:
-                        with st.spinner("Reordering playlist on Spotify..."):
-                            # Get current playlist tracks
-                            playlist_data, current_tracks = get_playlist_tracks(
-                                st.session_state.spotify_access_token, 
-                                playlist_id
-                            )
-                            
-                            st.info(f"Found {len(current_tracks)} tracks in playlist: {playlist_data['name']}")
-                            
-                            # Calculate reorder operations using the current sequence
-                            operations = calculate_reorder_operations(current_tracks, current_sequence)
-                            
-                            if operations:
-                                st.info(f"Executing {len(operations)} reorder operations...")
-                                
-                                # Apply reorder operations
-                                new_snapshot = reorder_playlist_tracks(
-                                    st.session_state.spotify_access_token,
-                                    playlist_id,
-                                    operations
-                                )
-                                
-                                st.success(f"✅ Successfully reordered playlist! New snapshot: {new_snapshot}")
-                                st.balloons()
-                            else:
-                                st.info("Playlist is already in the optimal harmonic order!")
-                                
-                    except Exception as e:
-                        st.error(f"Failed to reorder playlist: {e}")
-                        st.info("Make sure you own the playlist or have collaborative access.")
-            
-            with col2:
-                if st.button("🔓 Sign Out"):
-                    st.session_state.spotify_access_token = None
-                    st.session_state.code_verifier = None
-                    st.session_state.auth_state = None
-                    st.rerun()
-        else:
-            if not current_input:
-                st.warning("No playlist ID found. Make sure you used Spotify → SongData input method.")
-            elif not current_sequence:
-                st.warning("No harmonic sequence available. Please analyze a playlist first.")
-            else:
-                st.warning("Playlist data not available.")
-else:
-    if (songs or st.session_state.cached_songs) and not spotify_client_id:
-        st.info("Configure your Spotify Client ID and REDIRECT_URI in Streamlit secrets to enable playlist reordering.")
-    elif not (songs or st.session_state.cached_songs):
-        st.info("Fetch a playlist first to enable Spotify integration.")
 
 st.markdown("---")
 st.markdown(
