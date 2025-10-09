@@ -1,127 +1,5 @@
 # streamlit_app.py
 import streamlit as st
-# --- Added helpers for robust OAuth and caching handling (inserted by assistant) ---
-def _ensure_session_keys(*keys):
-    for k in keys:
-        if k not in st.session_state:
-            st.session_state[k] = None
-
-def _serialize_songs(songs):
-    try:
-        return [s.__dict__ for s in songs]
-    except Exception:
-        # If already serializable or not dataclass-like, return as-is
-        return list(songs)
-
-def _deserialize_songs(lst):
-    try:
-        return [Song(**d) for d in lst]
-    except Exception:
-        return lst
-
-
-
-def _process_oauth_callback_if_present(spotify_client_id, REDIRECT_URI, exchange_code_for_token):
-    """
-    Safely process OAuth callback from st.query_params.
-    This extracts single-string 'code' and 'state' values (st.query_params returns lists),
-    compares state, exchanges code for token, stores token in session_state,
-    sets a session flag to indicate auth just completed, clears query params,
-    and triggers a controlled rerun so the UI will re-read session_state and render the cached playlist.
-    """
-    try:
-        query_params = st.query_params  # mapping of keys -> list of strings
-    except Exception:
-        return
-
-    code_from_qp = query_params.get('code', [None])[0] if query_params else None
-    state_from_qp = query_params.get('state', [None])[0] if query_params else None
-
-    if code_from_qp and state_from_qp:
-        # proceed only if we have saved auth_state and code_verifier
-        if st.session_state.get('auth_state') and state_from_qp == st.session_state.get('auth_state') and st.session_state.get('code_verifier'):
-            try:
-                token_response = exchange_code_for_token(
-                    client_id=spotify_client_id,
-                    code=code_from_qp,
-                    redirect_uri=REDIRECT_URI,
-                    code_verifier=st.session_state.get('code_verifier')
-                )
-                access_token = token_response.get('access_token')
-                if access_token:
-                    # store token and mark that OAuth just completed for this session
-                    st.session_state.spotify_access_token = access_token
-                    st.session_state._oauth_just_completed = True
-                    # Properly clear URL query params in the browser
-                    try:
-                        st.experimental_set_query_params()
-                    except Exception:
-                        pass
-                    # Rerun so the main flow will pick up session_state changes and render the cached playlist.
-                    try:
-                        st.experimental_rerun()
-                    except Exception:
-                        pass
-            except Exception as e:
-                # Non-fatal: show error but continue
-                st.error(f"Authentication failed during callback processing: {e}")
-
-# --- End helpers ---
-
-
-# --- UI state restoration helpers (added by assistant) ---
-def restore_ui_state_from_session():
-    """
-    Populate st.session_state.render_songs and st.session_state.render_sequence
-    from cached_songs/cached_sequence after OAuth or on app start.
-    This ensures the main UI reads from session_state and will render the table
-    and enable rearrangement controls when appropriate.
-    """
-    try:
-        # ensure keys exist
-        if 'render_songs' not in st.session_state:
-            st.session_state['render_songs'] = None
-        if 'render_sequence' not in st.session_state:
-            st.session_state['render_sequence'] = None
-        # If we already have render_songs, keep them.
-        if st.session_state.get('render_songs'):
-            return
-
-        # Prefer cached_songs if present
-        if st.session_state.get('cached_songs'):
-            try:
-                st.session_state['render_songs'] = _deserialize_songs(st.session_state['cached_songs'])
-            except Exception:
-                st.session_state['render_songs'] = st.session_state['cached_songs']
-
-        # If OAuth just completed, also restore sequence (if available)
-        if st.session_state.get('_oauth_just_completed') or st.session_state.get('spotify_access_token'):
-            if st.session_state.get('cached_sequence'):
-                try:
-                    st.session_state['render_sequence'] = _deserialize_songs(st.session_state['cached_sequence'])
-                except Exception:
-                    st.session_state['render_sequence'] = st.session_state['cached_sequence']
-            # consume the flag so this runs only once after redirect
-            if st.session_state.get('_oauth_just_completed'):
-                st.session_state['_oauth_just_completed'] = False
-    except Exception:
-        # Non-fatal: ignore restoration failures to avoid breaking the app
-        pass
-
-
-# Call restore early so UI uses session-based render_songs
-try:
-    restore_ui_state_from_session()
-except Exception:
-    pass
-# --- end restoration helpers ---
-
-
-# Initialize top-level variables
-songs = None
-sequence = None
-
-
 import pandas as pd
 import numpy as np
 import requests
@@ -132,20 +10,13 @@ from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
 from io import StringIO
 import json
-import base64
-import hashlib
-import secrets
-import urllib.parse
-from urllib.parse import urlencode
-
 
 # -----------------------
 # Page config
 # -----------------------
-st.set_page_config(page_title="Harmonic Song Analyzer â€ Camelot + SongData",
+st.set_page_config(page_title="Harmonic Song Analyzer — Camelot + SongData",
                    page_icon="🎵",
                    layout="wide")
-
 
 # -----------------------
 # Data classes
@@ -155,21 +26,16 @@ class Song:
     title: str
     artist: str
     key: str
-    tempo: Optional[int] = None
+    tempo: Optional[float] = None
     mood: Optional[str] = None
     notes: Optional[str] = None
     camelot: Optional[str] = None
 
-
 # -----------------------
-# Key / Camelot detection helpers
+# Helpers
 # -----------------------
-# NOTE: order matters: match 10-12 before single digits.
 CAMLEOT_REGEX = re.compile(r'\(?\s*(?:1[0-2]|[1-9])\s*[ABab]\s*\)?')
 CAMEL_NUMERIC_ONLY = re.compile(r'^\s*\d+(\.\d+)?\s*$')
-KEY_NAME_REGEX = re.compile(r'^[A-Ga-g](?:[#♯]|[b♭])?m?$')
-KEY_NAME_IN_CELL = re.compile(r'[A-Ga-g](?:[#♯]|[b♭])?\s*(?:major|minor|Major|Minor)?', re.I)
-
 
 def is_probable_camelot(cell: str) -> bool:
     if not cell or str(cell).strip() == '':
@@ -186,68 +52,44 @@ def is_probable_camelot(cell: str) -> bool:
             pass
     return False
 
-
 def is_probable_keyname(cell: str) -> bool:
     if not cell or str(cell).strip() == '':
         return False
     s = str(cell).strip()
-    # More comprehensive key name detection including Unicode symbols
     if re.search(r'^[A-Ga-g](?:[#♯]|[b♭])?\s*(?:minor|major|Minor|Major)?$', s, re.I):
         return True
     return False
 
-
 def detect_key_column_from_rows(rows: List[List[str]], headers: List[str]) -> Optional[int]:
-    """
-    Determine best column index that looks like 'key'/'camelot'.
-    Prefer a column with header containing 'camelot' first (explicit).
-    Otherwise use content-scoring per column (ratio of cells that look like keys/Camelot).
-    """
     if not rows:
         return None
     ncols = max(len(r) for r in rows)
     scores = [0.0] * ncols
     counts = [0] * ncols
-
     for r in rows:
         for j in range(ncols):
             cell = r[j] if j < len(r) else ""
-            if cell is None:
-                cell = ""
-            cs = str(cell).strip()
+            cs = str(cell).strip() if cell is not None else ""
             if cs == "":
                 continue
             counts[j] += 1
             if is_probable_keyname(cs):
                 scores[j] += 1
-
     ratios = [(scores[i] / counts[i]) if counts[i] > 0 else 0.0 for i in range(ncols)]
-
-    # Otherwise consider a 'key' header (only if it actually looks key-like based on content)
     key_indices = [i for i, h in enumerate(headers) if 'key' in h.lower()]
     if key_indices:
         ki = key_indices[0]
         if ki < len(ratios) and ratios[ki] > 0.25:
             return ki
-
-    # final fallback: None
     return None
 
 def extract_key_and_camelot_from_cell(cell: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Given a cell possibly containing both a key and a Camelot code (e.g. 'C (8B)' or '8A'),
-    return (keyname, camelot_code).
-    """
     if cell is None:
         return None, None
     s = str(cell).strip()
     if not s:
         return None, None
-
-    # Handle Unicode musical symbols
     s = s.replace('♭', 'b').replace('♯', '#')
-
-    # Find Camelot token first (prefer full e.g. '10B', '11A', '8A', '(8B)')
     cam = None
     m = CAMLEOT_REGEX.search(s)
     if m:
@@ -258,8 +100,6 @@ def extract_key_and_camelot_from_cell(cell: str) -> Tuple[Optional[str], Optiona
             num = digits.group(0)
             let = (letter.group(1).upper() if letter else 'A')
             cam = f"{int(num)}{let}"
-
-    # Numeric-only cell (like '11') -> return '11' (ambiguous A/B)
     if cam is None and CAMEL_NUMERIC_ONLY.match(s):
         try:
             num = int(float(s))
@@ -267,44 +107,39 @@ def extract_key_and_camelot_from_cell(cell: str) -> Tuple[Optional[str], Optiona
                 cam = str(num)
         except Exception:
             pass
-
-    # Find keyname token - improved pattern to handle flats/sharps and major/minor
     keyname = None
-    
-    # First try: exact match for the whole string
     if re.match(r'^[A-Ga-g](?:[#b])?(?:\s*(?:major|minor|Major|Minor))?$', s, re.I):
         keyname = s
     else:
-        # Second try: search within the string for key pattern
         key_pattern = re.search(r'([A-Ga-g])([#b]?)\s*(major|minor|Major|Minor)?', s, re.I)
         if key_pattern:
             note = key_pattern.group(1).upper()
             accidental = key_pattern.group(2) or ''
             mode = key_pattern.group(3) or ''
-            
-            # Normalize the mode
             if mode.lower() == 'minor':
                 mode = 'm'
             elif mode.lower() == 'major':
                 mode = ''
             else:
                 mode = ''
-            
             keyname = f"{note}{accidental}{mode}"
-
-    # Clean up keyname if found
     if keyname:
         keyname = keyname.strip()
-        # Normalize case: first letter uppercase, rest as-is for accidentals and 'm'
         if len(keyname) >= 1:
             keyname = keyname[0].upper() + keyname[1:]
-
     return keyname, cam
 
+def parse_tempo(text: str) -> Optional[int]:
+    if not text:
+        return None
+    m = re.search(r'(\d{2,3})', str(text))
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    return None
 
-# -----------------------
-# SongData fetch + parse (header-aware + content detection)
-# -----------------------
 def extract_spotify_playlist_id(spotify_url: str) -> Optional[str]:
     if not spotify_url:
         return None
@@ -319,11 +154,12 @@ def extract_spotify_playlist_id(spotify_url: str) -> Optional[str]:
         return s
     return None
 
-
+# -----------------------
+# SongData fetch + parse
+# -----------------------
 def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool = False) -> Tuple[List[Song], str, Dict]:
     """
     Fetch SongData playlist and detect which column contains keys/camelot.
-    Uses header <th id="..."> when available to map columns precisely.
     Returns (songs, songdata_url, debug_info).
     """
     pid = extract_spotify_playlist_id(spotify_url)
@@ -349,34 +185,19 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
         'header_id_map': {}
     }
 
-    # helper to parse int bpm
-    def parse_tempo(text: str):
-        if not text:
-            return None
-        m = re.search(r'(\d{2,3})', text)
-        if m:
-            try:
-                return int(m.group(1))
-            except Exception:
-                return None
-        return None
-
     for table in tables:
         # find header th elements (prefer <thead>)
         thead = table.find('thead')
         header_ths = []
         if thead:
-            # use the header row inside thead (could be multiple rows; take the last header row)
             header_rows = thead.find_all('tr')
             if header_rows:
                 header_ths = header_rows[-1].find_all('th')
         else:
-            # fallback: first tr in table
             first_row = table.find('tr')
             if first_row:
                 header_ths = first_row.find_all('th')
 
-        # build header id -> position map AND heuristic label -> position
         header_pos_map: Dict[str, int] = {}
         id_map: Dict[str, int] = {}
         text_map: Dict[str, int] = {}
@@ -390,7 +211,6 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
             header_texts.append(th_text)
             if th_id:
                 id_map[th_id] = pos
-            # heuristics based on visible header text
             if 'track' in ltxt or 'title' in ltxt or 'song' in ltxt:
                 text_map.setdefault('title', pos)
             if 'artist' in ltxt:
@@ -398,12 +218,10 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
             if 'camelot' in ltxt:
                 text_map.setdefault('camelot', pos)
             if ltxt == 'key' or 'key' in ltxt:
-                # avoid mis-classifying 'monkey' etc. but that's unlikely in table headers
                 text_map.setdefault('key', pos)
             if 'bpm' in ltxt or 'tempo' in ltxt:
                 text_map.setdefault('tempo', pos)
 
-            # store data-column-index if present (as int) for debugging / fallback
             if data_col is not None:
                 try:
                     header_pos_map[f"colidx_{int(data_col)}"] = pos
@@ -413,14 +231,11 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
         debug_info['headers_seen'].append(header_texts)
         debug_info['header_id_map'].update(id_map)
 
-        # quick check that table looks like tracks (has title & artist by id/text)
         found_title = ('track_col' in id_map) or ('title' in text_map) or any('track' in h.lower() or 'title' in h.lower() for h in header_texts)
         found_artist = ('artist_col' in id_map) or ('artist' in text_map) or any('artist' in h.lower() for h in header_texts)
         if not (found_title and found_artist):
-            # not our table
             continue
 
-        # Build row matrix
         tbody = table.find('tbody') or table
         rows_html = tbody.find_all('tr')
         rows_cells: List[List[str]] = []
@@ -429,13 +244,11 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
             cols = row.find_all(['td', 'th'])
             texts = [c.get_text(strip=True) for c in cols]
             texts = [t if t is not None else "" for t in texts]
-            # normalize number of cells if some rows include fewer cells; keep as-is
             rows_cells.append(texts)
             if len(sample_rows) < 6:
                 sample_rows.append(texts)
         debug_info['first_rows'] = sample_rows
 
-        # Determine column indices for fields by prioritizing header ids, then header text heuristics, then detection fallback
         header_field_index: Dict[str, int] = {}
 
         # prefer ids if present
@@ -455,7 +268,6 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
             if k not in header_field_index:
                 header_field_index[k] = pos
 
-        # If we still don't have key/camelot, try auto-detection function as fallback
         key_col_idx = None
         camelot_col_idx = None
         if 'camelot' in header_field_index:
@@ -463,19 +275,16 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
         if 'key' in header_field_index:
             key_col_idx = header_field_index['key']
 
-        # prefer camelot column as the "key-like" column for explicit camelot values
         chosen_key_column_for_detection = camelot_col_idx if camelot_col_idx is not None else key_col_idx
 
-        # fallback: use detect_key_column_from_rows if we couldn't find key/camelot by headers
         if chosen_key_column_for_detection is None:
             guessed = detect_key_column_from_rows(rows_cells, header_texts)
-            # ensure guessed is an int and within a reasonable range
             if isinstance(guessed, int) and guessed >= 0:
                 chosen_key_column_for_detection = guessed
 
         debug_info['chosen_key_column'] = chosen_key_column_for_detection
 
-        # now extract songs using the determined column indices
+        # extract songs
         for row in rows_cells:
             def get_cell(i: int) -> str:
                 try:
@@ -483,14 +292,12 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
                 except Exception:
                     return ""
 
-            # Title & artist (if header indices are out of range, fallback to empty)
             title = ""
             artist = ""
             tempo_txt = ""
             if 'title' in header_field_index and header_field_index['title'] < len(row):
                 title = get_cell(header_field_index['title'])
             else:
-                # fallback: try common positions if header mapping failed
                 if len(row) > 2:
                     title = get_cell(2)
             if 'artist' in header_field_index and header_field_index['artist'] < len(row):
@@ -502,7 +309,6 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
             if 'tempo' in header_field_index and header_field_index['tempo'] < len(row):
                 tempo_txt = get_cell(header_field_index['tempo'])
             else:
-                # fallback: try to parse any cell that contains digits that look like bpm
                 for c in row:
                     if re.search(r'\b\d{2,3}\b', c):
                         tempo_txt = c
@@ -510,7 +316,6 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
 
             tempo = parse_tempo(tempo_txt)
 
-            # Key / Camelot extraction -- prefer explicit camelot column, then key column, then guessed column, then scan row
             camelot_val = None
             key_val = ""
 
@@ -522,7 +327,6 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
                 if cam:
                     camelot_val = cam
 
-            # try explicit key column
             if (not key_val or key_val == "") and 'key' in header_field_index and header_field_index['key'] < len(row):
                 possible = get_cell(header_field_index['key'])
                 kn, cam = extract_key_and_camelot_from_cell(possible)
@@ -531,7 +335,6 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
                 if cam and not camelot_val:
                     camelot_val = cam
 
-            # try chosen_key_column_for_detection (guessed)
             if (not key_val and not camelot_val) and chosen_key_column_for_detection is not None:
                 idx = chosen_key_column_for_detection
                 if idx < len(row):
@@ -542,7 +345,6 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
                     if cam and not camelot_val:
                         camelot_val = cam
 
-            # final fallback: scan cells
             if not key_val and not camelot_val:
                 for c in row:
                     kn, cam = extract_key_and_camelot_from_cell(c)
@@ -553,7 +355,6 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
                     if key_val or camelot_val:
                         break
 
-            # Compose display key and set camelot on Song object if present
             display_key = ""
             if key_val and camelot_val:
                 display_key = f"{key_val} ({camelot_val})"
@@ -570,10 +371,9 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
             songs.append(s)
 
         if songs:
-            # we parsed what we needed; break out of table loop
             break
 
-    # fallback: try JSON-embedded tracks (unchanged from your original)
+    # fallback: try JSON-embedded tracks
     if not songs:
         scripts = soup.find_all('script')
         for sc in scripts:
@@ -613,96 +413,65 @@ def fetch_songdata_playlist(spotify_url: str, timeout: float = 30.0, debug: bool
         return songs, songdata_url, debug_info
     return songs, songdata_url, {}
 
-
 # -----------------------
-# Camelot-based HarmonicSequencer (full-featured)
+# HarmonicSequencer
 # -----------------------
 class HarmonicSequencer:
     def __init__(self):
-        # Use standard music theory notation (sharps for major keys, context-appropriate for minors)
         self.camelot_to_key: Dict[str, str] = {
-            '1A': 'G#m', '1B': 'B',      # G# minor / B major
-            '2A': 'D#m', '2B': 'F#',     # D# minor / F# major  
-            '3A': 'A#m', '3B': 'C#',     # A# minor / C# major
-            '4A': 'Fm',  '4B': 'G#',     # F minor / G# major
-            '5A': 'Cm',  '5B': 'D#',     # C minor / D# major
-            '6A': 'Gm',  '6B': 'A#',     # G minor / A# major
-            '7A': 'Dm',  '7B': 'F',      # D minor / F major
-            '8A': 'Am',  '8B': 'C',      # A minor / C major
-            '9A': 'Em',  '9B': 'G',      # E minor / G major
-            '10A': 'Bm', '10B': 'D',     # B minor / D major
-            '11A': 'F#m', '11B': 'A',    # F# minor / A major
-            '12A': 'C#m', '12B': 'E'     # C# minor / E major
+            '1A': 'G#m', '1B': 'B',
+            '2A': 'D#m', '2B': 'F#',
+            '3A': 'A#m', '3B': 'C#',
+            '4A': 'Fm',  '4B': 'G#',
+            '5A': 'Cm',  '5B': 'D#',
+            '6A': 'Gm',  '6B': 'A#',
+            '7A': 'Dm',  '7B': 'F',
+            '8A': 'Am',  '8B': 'C',
+            '9A': 'Em',  '9B': 'G',
+            '10A': 'Bm', '10B': 'D',
+            '11A': 'F#m', '11B': 'A',
+            '12A': 'C#m', '12B': 'E'
         }
         self.alias_to_camelot: Dict[str, str] = self._build_alias_map()
-        self.camelot_codes: List[str] = list(self.camelot_to_key.keys())
 
     def _build_alias_map(self) -> Dict[str, str]:
         def clean(k: str) -> str:
             if not k:
                 return ""
             s = str(k).strip()
-            # Handle Unicode musical symbols that might appear in data
             s = s.replace('♭', 'b').replace('♯', '#')
-            # Remove spaces and case variations in major/minor
             s = s.replace(' Major', '').replace(' major', '')
             s = s.replace(' Minor', 'm').replace(' minor', 'm')
             s = re.sub(r'\s+', '', s)
             return s.lower()
-
         m: Dict[str, str] = {}
         def add_aliases(aliases: List[str], code: str):
             for a in aliases:
                 m[clean(a)] = code
-
-        # 1A/1B - B major / G#m (Ab minor)
         add_aliases(['B', 'B major', 'Cb', 'Cb major'], '1B')
         add_aliases(['G#m', 'G# minor', 'Abm', 'Ab minor'], '1A')
-        
-        # 2A/2B - F# major / D#m (Eb minor) 
         add_aliases(['F#', 'F# major', 'Gb', 'Gb major'], '2B')
         add_aliases(['D#m', 'D# minor', 'Ebm', 'Eb minor'], '2A')
-        
-        # 3A/3B - Db major / Bbm (A# minor)
         add_aliases(['Db', 'Db major', 'C#', 'C# major'], '3B')
         add_aliases(['Bbm', 'Bb minor', 'A#m', 'A# minor'], '3A')
-        
-        # 4A/4B - Ab major / Fm
         add_aliases(['Ab', 'Ab major', 'G#', 'G# major'], '4B')
         add_aliases(['Fm', 'F minor'], '4A')
-        
-        # 5A/5B - Eb major / Cm
         add_aliases(['Eb', 'Eb major', 'D#', 'D# major'], '5B')
         add_aliases(['Cm', 'C minor'], '5A')
-        
-        # 6A/6B - Bb major / Gm
         add_aliases(['Bb', 'Bb major', 'A#', 'A# major'], '6B')
         add_aliases(['Gm', 'G minor'], '6A')
-        
-        # 7A/7B - F major / Dm
         add_aliases(['F', 'F major'], '7B')
         add_aliases(['Dm', 'D minor'], '7A')
-        
-        # 8A/8B - C major / Am
         add_aliases(['C', 'C major'], '8B')
         add_aliases(['Am', 'A minor'], '8A')
-        
-        # 9A/9B - G major / Em
         add_aliases(['G', 'G major'], '9B')
         add_aliases(['Em', 'E minor'], '9A')
-        
-        # 10A/10B - D major / Bm
         add_aliases(['D', 'D major'], '10B')
         add_aliases(['Bm', 'B minor'], '10A')
-        
-        # 11A/11B - A major / F#m (Gb minor)
         add_aliases(['A', 'A major'], '11B')
         add_aliases(['F#m', 'F# minor', 'Gbm', 'Gb minor'], '11A')
-        
-        # 12A/12B - E major / C#m (Db minor)
         add_aliases(['E', 'E major'], '12B')
         add_aliases(['C#m', 'C# minor', 'Dbm', 'Db minor'], '12A')
-
         return m
 
     def _clean_key_input(self, key: str) -> str:
@@ -716,28 +485,20 @@ class HarmonicSequencer:
         return s.lower()
 
     def key_to_camelot(self, key: str) -> Optional[str]:
-        """
-        Map many key spellings or combined forms to a single canonical Camelot code.
-        Accepts input like 'A', 'A (11B)', '11B', 'C#m', 'Dbm', etc.
-        """
         if not key:
             return None
-        # Try to parse combined 'K (11B)' style first
         kn, cam = extract_key_and_camelot_from_cell(key)
         if cam:
-            # if cam is numeric-only, try to infer A/B from alias map via keyname
             if cam.isdigit() and kn:
                 mapped = self.alias_to_camelot.get(self._clean_key_input(kn))
                 if mapped:
                     return mapped
                 else:
-                    return cam  # numeric-only fallback
+                    return cam
             return cam
         cleaned = self._clean_key_input(key)
-        # direct alias lookup
         if cleaned in self.alias_to_camelot:
             return self.alias_to_camelot[cleaned]
-        # numeric-only input
         if CAMEL_NUMERIC_ONLY.match(cleaned):
             try:
                 num = int(float(cleaned))
@@ -745,7 +506,6 @@ class HarmonicSequencer:
                     return str(num)
             except Exception:
                 pass
-        # As a last attempt, check for a single-letter key that maps to a camelot
         if cleaned and cleaned in self.alias_to_camelot:
             return self.alias_to_camelot[cleaned]
         return None
@@ -767,11 +527,8 @@ class HarmonicSequencer:
         num = int(m.group(1))
         letter = m.group(2)
         other_letter = 'A' if letter == 'B' else 'B'
-        
-        # Handle circular nature: 12 wraps to 1, 1 wraps to 12
         prev_num = 12 if num == 1 else num - 1
         next_num = 1 if num == 12 else num + 1
-        
         return [f"{num}{other_letter}", f"{prev_num}{letter}", f"{next_num}{letter}"]
 
     def camelot_score(self, c1: str, c2: str) -> float:
@@ -779,7 +536,6 @@ class HarmonicSequencer:
             return 0.2
         if c1 == c2:
             return 1.0
-        # numeric-only conservative handling
         if str(c1).isdigit() or str(c2).isdigit():
             try:
                 if int(float(c1)) == int(float(c2)):
@@ -808,39 +564,26 @@ class HarmonicSequencer:
     def suggest_bridge_keys(self, key1: str, key2: str, available_keys: Optional[List[str]] = None) -> List[str]:
         c1 = self.key_to_camelot(key1)
         c2 = self.key_to_camelot(key2)
-        
         if not c1 or not c2 or c1 == c2:
             return []
-        
-        # If already harmonically compatible, no bridge needed
         if c2 in self.camelot_neighbors(c1):
             return []
-        
         def get_available_marker(code: str) -> str:
             if not available_keys:
                 return ""
             available_camelot = [self.key_to_camelot(k) for k in available_keys]
             return " ★" if code in available_camelot else ""
-        
-        # Simple BFS to find all shortest harmonic paths
         from collections import deque
-        
-        queue = deque([(c1, [])])  # (current_key, path_so_far)
+        queue = deque([(c1, [])])
         visited = {c1}
         all_paths = []
         min_length = float('inf')
-        
         while queue:
             current, path = queue.popleft()
-            
-            # If path is longer than current minimum, skip
             if len(path) > min_length:
                 continue
-                
-            # Check all harmonic neighbors
             for neighbor in self.camelot_neighbors(current):
                 if neighbor == c2:
-                    # Found destination - this is a complete path
                     final_path = path + [neighbor] if neighbor != c2 else path
                     if len(final_path) < min_length:
                         min_length = len(final_path)
@@ -851,23 +594,16 @@ class HarmonicSequencer:
                     visited.add(neighbor)
                     new_path = path + [neighbor]
                     queue.append((neighbor, new_path))
-        
-        # Remove destination from paths and format results
         results = []
         seen_paths = set()
-        
         for path in all_paths:
-            # Remove destination key if it appears in path
             bridge_path = [step for step in path if step != c2]
-            
-            if not bridge_path:  # Skip empty paths
+            if not bridge_path:
                 continue
-                
             path_key = tuple(bridge_path)
             if path_key in seen_paths:
                 continue
             seen_paths.add(path_key)
-            
             if len(bridge_path) == 1:
                 marker = get_available_marker(bridge_path[0])
                 formatted = f"{self.camelot_to_display(bridge_path[0])}{marker}"
@@ -877,22 +613,16 @@ class HarmonicSequencer:
                     marker = get_available_marker(step)
                     path_parts.append(f"{self.camelot_to_display(step)}{marker}")
                 formatted = " -> ".join(path_parts)
-            
             results.append(formatted)
-        
         return results
 
     def create_harmonic_sequence(self, songs: List[Song]) -> List[Song]:
         if not songs:
             return []
-        
         if len(songs) == 1:
             return songs[:]
-        
-        # Group songs by Camelot position
         position_groups = {}
         unkeyed_songs = []
-        
         for song in songs:
             camelot = self.key_to_camelot(song.key)
             if camelot and camelot in self.camelot_to_key:
@@ -901,82 +631,53 @@ class HarmonicSequencer:
                 position_groups[camelot].append(song)
             else:
                 unkeyed_songs.append(song)
-        
         if not position_groups:
             return songs[:]
-        
         available_positions = list(position_groups.keys())
-        
         def get_harmonic_neighbors(camelot_code):
-            """Get adjacent positions on the Camelot wheel"""
             m = re.match(r'(\d+)([AB])', camelot_code)
             if not m:
                 return []
-            
             num = int(m.group(1))
             letter = m.group(2)
             other_letter = 'A' if letter == 'B' else 'B'
-            
             neighbors = []
-            
-            # Horizontal (same number, different letter)
             neighbors.append(f"{num}{other_letter}")
-            
-            # Vertical (adjacent numbers, same letter) with wrap-around
             up = num + 1 if num < 12 else 1
             down = num - 1 if num > 1 else 12
             neighbors.append(f"{up}{letter}")
             neighbors.append(f"{down}{letter}")
-            
-            # Diagonal (adjacent numbers, different letter)
             neighbors.append(f"{up}{other_letter}")
             neighbors.append(f"{down}{other_letter}")
-            
             return neighbors
-        
         def find_hamiltonian_path_dfs():
-            """Use depth-first search with proper backtracking to find Hamiltonian path"""
-            
             def dfs(path, remaining):
                 if not remaining:
-                    return path  # Found complete path
-                
+                    return path
                 if not path:
-                    # Try starting from each position
                     for start in available_positions:
                         result = dfs([start], [pos for pos in available_positions if pos != start])
                         if result:
                             return result
                     return None
-                
                 current = path[-1]
                 neighbors = get_harmonic_neighbors(current)
-                
-                # Try each remaining position that's a harmonic neighbor
                 for next_pos in remaining:
                     if next_pos in neighbors:
                         new_remaining = [pos for pos in remaining if pos != next_pos]
                         result = dfs(path + [next_pos], new_remaining)
                         if result:
                             return result
-                
-                return None  # No valid path from this state
-            
+                return None
             return dfs([], available_positions)
-        
-        # Find the Hamiltonian path
         hamiltonian_path = find_hamiltonian_path_dfs()
-        
         if hamiltonian_path:
-            # Build sequence following the harmonic path
             sequence = []
             for position in hamiltonian_path:
                 sequence.extend(position_groups[position])
             sequence.extend(unkeyed_songs)
             return sequence
         else:
-            # Fallback: if somehow no path found, use original order
-            # This shouldn't happen with your example since there IS a valid path
             return songs[:]
 
     def find_mixing_pairs(self, songs: List[Song]) -> List[Tuple[Song, Song, float]]:
@@ -989,7 +690,6 @@ class HarmonicSequencer:
 
     def analyze_song_collection(self, songs: List[Song], available_keys: Optional[List[str]] = None) -> Dict:
         for s in songs:
-            # If Song.camelot was set by the fetcher, keep it; otherwise infer from s.key
             if not s.camelot:
                 s.camelot = self.key_to_camelot(s.key)
         sequence = self.create_harmonic_sequence(songs)
@@ -1004,7 +704,6 @@ class HarmonicSequencer:
                 suggestions = self.suggest_bridge_keys(a.key, b.key, available_keys=existing_keys)
                 gaps_and_bridges.append({'from': a, 'to': b, 'score': score, 'suggestions': suggestions})
         return {'sequence': sequence, 'mixing_pairs': mixing_pairs, 'gaps_and_bridges': gaps_and_bridges}
-
 
 # -----------------------
 # BPM fetch helper (best-effort)
@@ -1025,283 +724,52 @@ def fetch_bpm_from_web(title: str, artist: str, timeout: float = 5.0) -> Optiona
         return None
     return None
 
-def generate_code_verifier():
-    """Generate code verifier for PKCE"""
-    return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8').rstrip('=')
-
-def generate_code_challenge(verifier):
-    """Generate code challenge from verifier for PKCE"""
-    digest = hashlib.sha256(verifier.encode('utf-8')).digest()
-    return base64.urlsafe_b64encode(digest).decode('utf-8').rstrip('=')
-
-def get_spotify_auth_url(client_id: str, redirect_uri: str, code_challenge: str, state: str):
-    """Generate Spotify authorization URL"""
-    scopes = [
-        'playlist-modify-public',
-        'playlist-modify-private', 
-        'playlist-read-private',
-        'playlist-read-collaborative'
-    ]
-    
-    params = {
-        'client_id': client_id,
-        'response_type': 'code',
-        'redirect_uri': redirect_uri,
-        'code_challenge_method': 'S256',
-        'code_challenge': code_challenge,
-        'state': state,
-        'scope': ' '.join(scopes)
-    }
-    
-    return f"https://accounts.spotify.com/authorize?{urlencode(params)}"
-
-def exchange_code_for_token(client_id: str, code: str, redirect_uri: str, code_verifier: str):
-    """Exchange authorization code for access token"""
-    token_data = {
-        'client_id': client_id,
-        'grant_type': 'authorization_code',
-        'code': code,
-        'redirect_uri': redirect_uri,
-        'code_verifier': code_verifier,
-    }
-    
-    response = requests.post(
-        'https://accounts.spotify.com/api/token',
-        data=token_data,
-        headers={'Content-Type': 'application/x-www-form-urlencoded'}
-    )
-    
-    if response.status_code == 200:
-        return response.json()
-    else:
-        raise Exception(f"Token exchange failed: {response.text}")
-
-def get_playlist_tracks(access_token: str, playlist_id: str):
-    """Get current playlist tracks from Spotify"""
-    headers = {'Authorization': f'Bearer {access_token}'}
-    
-    # Get playlist details first
-    playlist_response = requests.get(
-        f'https://api.spotify.com/v1/playlists/{playlist_id}',
-        headers=headers
-    )
-    
-    if playlist_response.status_code != 200:
-        raise Exception(f"Failed to fetch playlist: {playlist_response.text}")
-    
-    playlist_data = playlist_response.json()
-    tracks = []
-    
-    # Get all tracks (handle pagination)
-    url = f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks'
-    while url:
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            raise Exception(f"Failed to fetch tracks: {response.text}")
-        
-        data = response.json()
-        tracks.extend(data['items'])
-        url = data['next']  # Next page URL or None
-    
-    return playlist_data, tracks
-
-def reorder_playlist_tracks(access_token: str, playlist_id: str, reorder_operations: list):
-    """Reorder tracks in a Spotify playlist based on operations list"""
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json'
-    }
-    
-    # Get current snapshot_id
-    playlist_response = requests.get(
-        f'https://api.spotify.com/v1/playlists/{playlist_id}',
-        headers=headers
-    )
-    
-    if playlist_response.status_code != 200:
-        raise Exception(f"Failed to get playlist info: {playlist_response.text}")
-    
-    snapshot_id = playlist_response.json()['snapshot_id']
-    
-    # Execute reorder operations
-    for operation in reorder_operations:
-        reorder_data = {
-            'range_start': operation['range_start'],
-            'insert_before': operation['insert_before'],
-            'snapshot_id': snapshot_id
-        }
-        
-        if 'range_length' in operation:
-            reorder_data['range_length'] = operation['range_length']
-        
-        response = requests.put(
-            f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks',
-            headers=headers,
-            json=reorder_data
-        )
-        
-        if response.status_code != 200:
-            raise Exception(f"Failed to reorder tracks: {response.text}")
-        
-        # Update snapshot_id for next operation
-        snapshot_id = response.json()['snapshot_id']
-    
-    return snapshot_id
-
-def calculate_reorder_operations(original_tracks: list, target_order: list):
-    """Calculate the minimum reorder operations needed to achieve target order"""
-    # Create mapping from track URI to position in target order
-    target_positions = {}
-    for i, song in enumerate(target_order):
-        # Find matching track in original tracks by title and artist
-        for j, track_item in enumerate(original_tracks):
-            track = track_item['track']
-            if (track and 
-                track.get('name', '').lower() == song.title.lower() and
-                track.get('artists') and
-                any(artist.get('name', '').lower() == song.artist.lower() 
-                    for artist in track['artists'])):
-                target_positions[j] = i
-                break
-    
-    # Generate reorder operations
-    operations = []
-    current_positions = list(range(len(original_tracks)))
-    
-    for target_pos in range(len(target_order)):
-        # Find current position of track that should be at target_pos
-        current_track_original_pos = None
-        for orig_pos, current_pos in enumerate(current_positions):
-            if orig_pos in target_positions and target_positions[orig_pos] == target_pos:
-                current_track_original_pos = orig_pos
-                break
-        
-        if current_track_original_pos is None:
-            continue
-            
-        # Find where this track currently is
-        current_pos = current_positions.index(current_track_original_pos)
-        
-        if current_pos != target_pos:
-            # Need to move track from current_pos to target_pos
-            operations.append({
-                'range_start': current_pos,
-                'insert_before': target_pos if target_pos < current_pos else target_pos + 1,
-                'range_length': 1
-            })
-            
-            # Update current_positions to reflect the move
-            track_to_move = current_positions.pop(current_pos)
-            insert_pos = target_pos if target_pos < current_pos else target_pos
-            current_positions.insert(insert_pos, track_to_move)
-    
-    return operations
-
-
 # -----------------------
-# Streamlit UI
+# UI / Main flow
 # -----------------------
+st.title("Harmonic Song Analyzer — Camelot + SongData")
+st.markdown("Paste a Spotify playlist link (it will be converted to songdata.io) or upload/paste a CSV. Choose an arrangement mode and download the arranged order.")
 
-
-# Process OAuth callback safely (added by assistant)
-try:
-    _process_oauth_callback_if_present(spotify_client_id, REDIRECT_URI, exchange_code_for_token)
-except Exception:
-    pass
-st.title("Harmonic Song Analyzer - Leverages songdata.io and Camelot System for Harmonic Mixing")
-st.markdown("Paste the share link for your spotify playlist in order to build a harmonic play order, and get bridge-key suggestions.")
-
-# Add instructions in expandable section
 with st.expander("📖 Instructions & Help"):
     st.markdown("""
-    ### Quick Start
-    
-    1. **Choose your input method**:
-       - **Spotify → SongData**: Enter Spotify playlist URL to fetch key data automatically
-       - **Upload CSV**: Include Title, Artist, and Key columns
-       - **Paste Data**: Copy/paste CSV-formatted text
-    
-    2. **Review your playlist**: The app automatically detects keys and converts them to Camelot codes
-    
-    3. **Get your harmonic sequence**: View the optimized play order in the results table
-    
-    ### Supported Key Formats
-    
-    The app understands many key formats:
-    - `C`, `Am`, `F#`, `Bb` (standard)
-    - `C Major`, `A minor` (with mode)
-    - `C♯`, `D♭` (Unicode symbols)
-    - `C (8B)` (key with Camelot code)
-    
-    ### Understanding the Results
-    
-    **Recommended Play Order**: Songs arranged for smooth harmonic transitions
-    
-    **Bridge Suggestions**: When songs don't flow harmonically, the app suggests keys to add between them. Keys marked with ★ are already in your collection.
-    
-    ### The Camelot System
-    
-    Songs flow smoothly between adjacent positions:
-    - **Same number**: 8A ↔ 8B (relative major/minor)
-    - **Adjacent numbers**: 8A → 9A → 10A (energy progression)
-    - **Diagonal**: 8A → 9B (energy + mode change)
-    - **Circular**: 12A connects to 1A (the wheel wraps around)
-    
-    ### Tips
-    
-    - **CSV Format**: Use columns like "Title", "Artist", "Key" or "Camelot"
-    - **SongData URLs**: Works with Spotify playlist URLs (songdata.io analyzes them automatically)
-    - **Mixed Formats**: The app handles various key spellings in the same playlist
-    - **Bridge Keys**: Use suggested bridge keys to fill harmonic gaps in your mix
-    
-    ### Troubleshooting
-    
-    - **Keys not detected?** Check your key format matches the examples above
-    - **SongData not loading?** Try a different Spotify playlist or check the URL format
-    - **No bridge suggestions?** Your playlist already flows harmonically!
+    - Input: Use "Fetch from Spotify → SongData" to paste a Spotify playlist link (no Spotify auth needed).
+    - Or upload a CSV with columns like: Title, Artist, Key (Camelot or key names), Tempo (BPM).
+    - Modes:
+      - Key — harmonic wheel order (Camelot).
+      - Tempo — ascending BPM.
+      - Key + Tempo — key-first (harmonic path), tempo-smoothed within and between keys.
+      - Tempo + Key (Bridged) — tempo-first ordering with harmonic compatibility and bridge suggestions for large gaps.
     """)
 
 left_col, right_col = st.columns([1, 2])
 
 with left_col:
     st.header("Input")
-    input_mode = st.radio(
-        "Choose input method",
-        ["Fetch from Spotify → SongData", "Upload CSV / Paste"],
-        key="input_mode_radio"
-    )
+    input_mode = st.radio("Choose input method", ["Fetch from Spotify → SongData", "Upload CSV / Paste"], key="input_mode_radio")
     uploaded_file = None
     pasted_text = ""
     songdata_input = ""
-    sd_timeout = 300
+    sd_timeout = 120
     sd_debug = False
     fetch_songdata_btn = False
 
     if input_mode == "Upload CSV / Paste":
-        uploaded_file = st.file_uploader("Upload CSV", type=["csv"], key="csv_uploader")
-        pasted_text = st.text_area("Paste CSV or song list here", key="csv_paste_area")
+        uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+        pasted_text = st.text_area("Paste CSV or song list here")
     else:
-        songdata_input = st.text_input("Spotify playlist URL", key="spotify_url_input")
-        sd_timeout = st.slider("SongData fetch timeout (seconds)", min_value=5, max_value=600, value=300, key="sd_timeout_slider")
-        sd_debug = st.checkbox("Show SongData fetch debug info", value=False, key="sd_debug_checkbox")
-        fetch_songdata_btn = st.button("Fetch SongData playlist", key="fetch_songdata_btn")
+        songdata_input = st.text_input("Spotify playlist URL or ID")
+        sd_timeout = st.slider("SongData fetch timeout (seconds)", min_value=5, max_value=600, value=120)
+        sd_debug = st.checkbox("Show SongData fetch debug info", value=False)
+        fetch_songdata_btn = st.button("Fetch SongData playlist")
 
     st.markdown("---")
     st.header("Options")
-    shuffle_flag = st.checkbox("Shuffle input order before sequencing", value=False, key="shuffle_checkbox")
-    auto_bpm = st.checkbox("Attempt to fetch missing tempos (slow)", value=False, key="auto_bpm_checkbox")
+    shuffle_flag = st.checkbox("Shuffle input order before sequencing", value=False)
+    auto_bpm = st.checkbox("Attempt to fetch missing tempos (slow)", value=False)
 
-    # NEW: Sorting mode selectbox (Key / Tempo / Key + Tempo)
-    sort_mode = st.selectbox("Arrange setlist by:", ["Key", "Tempo", "Key + Tempo"], index=0, key="sort_mode_select")
-    
-# Initialize session state for both auth and playlist data at the top level
-for key in ("spotify_access_token", "code_verifier", "auth_state", "cached_songs", "cached_songdata_input", "cached_sequence"):
-    if key not in st.session_state:
-        st.session_state[key] = None
+    sort_mode = st.selectbox("Arrange setlist by:", ["Key", "Tempo", "Key + Tempo", "Tempo + Key (Bridged)"], index=0)
 
-# Move the session state initialization to the very top, right after the data loading sections
-# This needs to happen BEFORE any session state access
-
+# load songs list
 songs: List[Song] = []
 
 # Uploaded CSV
@@ -1334,7 +802,10 @@ if uploaded_file:
             artist = str(r.get('artist') or r.get('Artist') or "")
             tempo = None
             if 'tempo' in r and pd.notna(r.get('tempo')):
-                tempo = r.get('tempo')
+                try:
+                    tempo = float(r.get('tempo'))
+                except Exception:
+                    tempo = None
             key_display = ""
             camelot_val = None
             if key_col:
@@ -1363,37 +834,42 @@ if uploaded_file:
 # Pasted text
 if pasted_text and not songs:
     sio = StringIO(pasted_text)
+    parsed = False
     try:
         df = pd.read_csv(sio, header=None)
         for _, r in df.iterrows():
             parts = [str(x) for x in r if pd.notna(x)]
             if len(parts) >= 3:
-                tempo = int(parts[3]) if len(parts) > 3 and str(parts[3]).isdigit() else None
+                tempo = None
+                if len(parts) > 3 and str(parts[3]).isdigit():
+                    tempo = float(parts[3])
                 songs.append(Song(title=parts[0], artist=parts[1], key=parts[2], tempo=tempo))
+        parsed = True
         st.success(f"Parsed {len(songs)} songs from pasted CSV/text")
     except Exception:
         lines = [l.strip() for l in pasted_text.splitlines() if l.strip()]
         for line in lines:
             parts = [p.strip() for p in re.split(r',|\t|;', line) if p.strip()]
             if len(parts) >= 3:
-                tempo = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None
+                tempo = None
+                if len(parts) > 3 and parts[3].isdigit():
+                    tempo = float(parts[3])
                 songs.append(Song(title=parts[0], artist=parts[1], key=parts[2], tempo=tempo))
         if songs:
+            parsed = True
             st.success(f"Parsed {len(songs)} songs from pasted text")
+    if not parsed and not songs:
+        st.info("No valid songs parsed from pasted text.")
 
 # Fetch from SongData if requested
 if input_mode == "Fetch from Spotify → SongData" and fetch_songdata_btn:
     if not songdata_input:
-        st.error("Please enter a Spotify playlist URL or URI.")
+        st.error("Please enter a Spotify playlist URL or ID.")
     else:
-        with st.spinner("Fetching SongData playlist (may take some time)..."):
+        with st.spinner("Fetching SongData playlist (may take a moment)..."):
             try:
                 fetched_songs, sd_url, debug_info = fetch_songdata_playlist(songdata_input, timeout=sd_timeout, debug=sd_debug)
                 songs = fetched_songs
-                # Cache the results in session state
-                st.session_state.cached_songs = _serialize_songs(songs)
-                st.session_state.cached_songdata_input = songdata_input
-                
                 st.success(f"Fetched {len(songs)} songs from SongData")
                 st.markdown(f"[Open SongData playlist page]({sd_url})")
                 if sd_debug:
@@ -1409,74 +885,60 @@ if input_mode == "Fetch from Spotify → SongData" and fetch_songdata_btn:
                 if pid:
                     st.markdown(f"Try opening the SongData page directly: https://songdata.io/playlist/{pid}")
 
-# If no new fetch, try to use cached songs (for OAuth redirects)
-if st.session_state.get('cached_songs') and (songs is None or (isinstance(songs, (list, tuple)) and len(songs) == 0)):
-    songs = _deserialize_songs(st.session_state.cached_songs)
-    if st.session_state.cached_songdata_input:
-        songdata_input = st.session_state.cached_songdata_input
-        # Show that we've restored cached data
+# If still no songs, try to use cached session (if any)
+if not songs and st.session_state.get('cached_songs'):
+    try:
+        cached = st.session_state.cached_songs
+        if isinstance(cached, list) and cached and isinstance(cached[0], dict):
+            songs = [Song(**d) for d in cached]
+        elif isinstance(cached, list) and isinstance(cached[0], Song):
+            songs = cached
         st.info(f"Restored {len(songs)} songs from cache")
+    except Exception:
+        pass
 
-# If OAuth just completed in this session, or we already have a spotify token, ensure UI will render and allow playlist reordering.
-try:
-    if (st.session_state.get('_oauth_just_completed') or st.session_state.get('spotify_access_token')) and st.session_state.get('cached_songs'):
-        # ensure sequence and other cached pieces are restored so the UI displays as expected
-        if st.session_state.get('cached_sequence') and (sequence is None or (isinstance(sequence, (list, tuple)) and len(sequence) == 0)):
-            try:
-                sequence = _deserialize_songs(st.session_state.cached_sequence)
-            except Exception:
-                sequence = None
-        # mark that we've consumed the just-completed flag to avoid repeated messages
-        if st.session_state.get('_oauth_just_completed'):
-            st.session_state._oauth_just_completed = False
-            st.success("✅ Authentication completed and local playlist cache restored.")
-except Exception:
-    pass
-
-
-
-# Right column: results and analysis
+# Analysis & arrangement
 with right_col:
     if songs:
         hs = HarmonicSequencer()
-
         if shuffle_flag:
             np.random.shuffle(songs)
 
         if auto_bpm:
-            with st.spinner("Fetching BPMs..."):
+            with st.spinner("Fetching missing BPMs..."):
                 for s in songs:
                     if s.tempo is None or (isinstance(s.tempo, float) and np.isnan(s.tempo)):
                         bpm = fetch_bpm_from_web(s.title, s.artist)
                         if bpm:
-                            s.tempo = bpm
+                            s.tempo = float(bpm)
                         time.sleep(0.12)
 
-        # Ensure each Song has camelot assigned if possible
         for s in songs:
             if not s.camelot:
                 s.camelot = hs.key_to_camelot(s.key)
 
-        # Base harmonic analysis (uses Camelot sequencing)
+        # Base harmonic analysis
         analysis = hs.analyze_song_collection(songs, available_keys=[s.key for s in songs])
-        base_sequence = analysis['sequence']  # harmonic sequence as originally computed
+        base_sequence = analysis['sequence']
 
-        # ---------- NEW: Respect user's sort_mode selection ----------
-        # sort_mode options: "Key", "Tempo", "Key + Tempo"
-        arranged_sequence = None
+        arranged = None
+
+        # Helper for safe tempo value
+        def tempo_val_for_sort(s: Song):
+            t = s.tempo
+            return float(t) if (t is not None and not (isinstance(t, float) and np.isnan(t))) else None
 
         if sort_mode == "Key":
-            arranged = hs.create_harmonic_sequence(songs)
+            arranged = base_sequence
 
         elif sort_mode == "Tempo":
-            arranged = sorted(songs, key=lambda s: (s.tempo or 0))
+            arranged = sorted(songs, key=lambda s: (tempo_val_for_sort(s) is None, tempo_val_for_sort(s) or 0, s.title.lower(), s.artist.lower()))
 
         elif sort_mode == "Key + Tempo":
-            # Existing harmonic-first logic with local tempo smoothing
-            base_sequence = hs.create_harmonic_sequence(songs)
+            # Key-first: preserve harmonic group order, then tempo-smooth inside & between groups
             group_order = []
-            groups = {}
-            unkeyed = []
+            groups: Dict[str, List[Song]] = {}
+            unkeyed: List[Song] = []
             for s in base_sequence:
                 cam = hs.key_to_camelot(s.key)
                 if cam:
@@ -1486,138 +948,146 @@ with right_col:
                     groups[cam].append(s)
                 else:
                     unkeyed.append(s)
-
-            def tempo_val(s: Song):
-                t = s.tempo
-                return float(t) if (t is not None and not (isinstance(t, float) and np.isnan(t))) else None
-
+            seen = set((s.title, s.artist) for s in base_sequence)
+            for s in songs:
+                if (s.title, s.artist) in seen:
+                    continue
+                cam = hs.key_to_camelot(s.key)
+                if cam:
+                    if cam not in groups:
+                        groups[cam] = []
+                        group_order.append(cam)
+                    groups[cam].append(s)
+                else:
+                    unkeyed.append(s)
             for cam in groups:
-                groups[cam] = sorted(groups[cam], key=lambda s: (tempo_val(s) is None, tempo_val(s) or 0))
-
-            arranged_sequence = []
+                groups[cam] = sorted(groups[cam], key=lambda ss: (tempo_val_for_sort(ss) is None, tempo_val_for_sort(ss) or 0))
+            arranged_sequence: List[Song] = []
             last_tempo = None
             for cam in group_order:
-                group = groups[cam]
+                group = groups.get(cam, [])
                 if not arranged_sequence:
                     arranged_sequence.extend(group)
-                    last_tempo = tempo_val(arranged_sequence[-1])
+                    last_tempo = tempo_val_for_sort(arranged_sequence[-1]) if arranged_sequence else last_tempo
                     continue
-
-                first_t = tempo_val(group[0])
-                last_t = tempo_val(group[-1])
+                if not group:
+                    continue
+                first_t = tempo_val_for_sort(group[0])
+                last_t = tempo_val_for_sort(group[-1])
                 if last_tempo is None:
                     arranged_sequence.extend(group)
-                    last_tempo = tempo_val(arranged_sequence[-1])
+                    last_tempo = tempo_val_for_sort(arranged_sequence[-1]) if arranged_sequence else last_tempo
                     continue
-
                 jump_keep = abs((first_t or last_tempo) - last_tempo) if first_t is not None else 999
                 jump_reverse = abs((last_t or last_tempo) - last_tempo) if last_t is not None else 999
-
                 if jump_reverse < jump_keep:
                     group = list(reversed(group))
-
                 arranged_sequence.extend(group)
-                last_t = tempo_val(arranged_sequence[-1])
+                last_t = tempo_val_for_sort(arranged_sequence[-1]) if arranged_sequence else last_t
                 if last_t is not None:
                     last_tempo = last_t
-            arranged = arranged_sequence + sorted(unkeyed, key=lambda s: (tempo_val(s) is None, tempo_val(s) or 0))
+            arranged = arranged_sequence + sorted(unkeyed, key=lambda ss: (tempo_val_for_sort(ss) is None, tempo_val_for_sort(ss) or 0))
 
-        elif sort_mode == "Tempo + Key (Bridged)":
-            # Tempo-first harmonic arrangement with bridge suggestions
+        else:  # "Tempo + Key (Bridged)"
             songs_with_key = [s for s in songs if hs.key_to_camelot(s.key)]
             unkeyed = [s for s in songs if not hs.key_to_camelot(s.key)]
 
-            def tempo_val(s):
-                return s.tempo if s.tempo not in (None, np.nan) else None
-
-            # Define harmonic adjacency: same number ±1, same A/B, or A↔B with same number
             def is_harmonically_compatible(k1, k2):
                 if not k1 or not k2:
                     return False
-                m1 = re.match(r"(\\d{1,2})([AB])", k1)
-                m2 = re.match(r"(\\d{1,2})([AB])", k2)
+                m1 = re.match(r"(\d{1,2})([AB])", k1)
+                m2 = re.match(r"(\d{1,2})([AB])", k2)
                 if not m1 or not m2:
                     return False
                 n1, l1 = int(m1.group(1)), m1.group(2)
                 n2, l2 = int(m2.group(1)), m2.group(2)
                 if n1 == n2 and l1 != l2:
                     return True
-                if abs(n1 - n2) == 1 and l1 == l2:
+                if abs((n1 - n2) % 12) == 1 and l1 == l2:
                     return True
                 if (n1 == 1 and n2 == 12 or n1 == 12 and n2 == 1) and l1 == l2:
                     return True
                 return False
 
             def transition_cost(a, b):
-                tempo_gap = abs((tempo_val(a) or 0) - (tempo_val(b) or 0))
+                tg = abs((tempo_val_for_sort(a) or 0) - (tempo_val_for_sort(b) or 0))
                 harmonic_penalty = 0 if is_harmonically_compatible(hs.key_to_camelot(a.key), hs.key_to_camelot(b.key)) else 50
-                return tempo_gap + harmonic_penalty
+                return tg + harmonic_penalty
 
             remaining = songs_with_key[:]
-            arranged_sequence = []
+            arranged_sequence: List[Song] = []
 
-            # Start from song closest to median tempo
-            valid_tempos = [tempo_val(s) for s in remaining if tempo_val(s) is not None]
-            start_index = 0
+            valid_tempos = [tempo_val_for_sort(s) for s in remaining if tempo_val_for_sort(s) is not None]
             if valid_tempos:
-                median_tempo = np.median(valid_tempos)
-                start_index = int(np.argmin([abs((tempo_val(s) or median_tempo) - median_tempo) for s in remaining]))
-            arranged_sequence.append(remaining.pop(start_index))
+                median_tempo = float(np.median(valid_tempos))
+                start_index = int(np.argmin([abs((tempo_val_for_sort(s) or median_tempo) - median_tempo) for s in remaining]))
+            else:
+                start_index = 0
 
+            arranged_sequence.append(remaining.pop(start_index))
             while remaining:
                 last = arranged_sequence[-1]
                 next_song = min(remaining, key=lambda s: transition_cost(last, s))
                 arranged_sequence.append(next_song)
                 remaining.remove(next_song)
 
-            arranged = arranged_sequence + sorted(unkeyed, key=lambda s: tempo_val(s) or 0)
+            arranged = arranged_sequence + sorted(unkeyed, key=lambda s: (tempo_val_for_sort(s) is None, tempo_val_for_sort(s) or 0))
 
-            # Suggest bridge songs for large gaps
+            # Suggest bridges for large gaps
             bridge_suggestions = []
             for i in range(len(arranged) - 1):
-                a, b = arranged[i], arranged[i + 1]
-                tempo_gap = abs((tempo_val(a) or 0) - (tempo_val(b) or 0))
+                a = arranged[i]
+                b = arranged[i + 1]
+                a_t = tempo_val_for_sort(a) or 0
+                b_t = tempo_val_for_sort(b) or 0
+                tempo_gap = abs(a_t - b_t)
                 a_key = hs.key_to_camelot(a.key)
                 b_key = hs.key_to_camelot(b.key)
-                if not is_harmonically_compatible(a_key, b_key) or tempo_gap > 15:
-                    bridge_keys = []
+                if (not is_harmonically_compatible(a_key, b_key)) or tempo_gap > 15:
+                    candidate_keys = []
                     if a_key and b_key:
-                        a_num, a_mode = int(a_key[:-1]), a_key[-1]
-                        b_num, b_mode = int(b_key[:-1]), b_key[-1]
-                        neighbor_keys = [f"{(a_num + 1 - 1) % 12 + 1}{a_mode}", f"{(a_num - 1 - 1) % 12 + 1}{a_mode}", f"{a_num}{'B' if a_mode == 'A' else 'A'}"]
-                        bridge_keys = [k for k in neighbor_keys if is_harmonically_compatible(k, b_key)]
-                        bridge_suggestions.append({
-                            "From → To": f"{a.title} → {b.title}",
-                            "Tempo Gap (BPM)": tempo_gap,
-                            "Suggested Bridge Key(s)": ", ".join(bridge_keys) or "None",
-                            "Ideal Bridge Tempo (BPM)": round(((tempo_val(a) or 0) + (tempo_val(b) or 0)) / 2)
-                        })
-    
-                        
-            
-                    # --- Display results ---
-                    st.subheader(f"Arranged by {sort_mode}")
-                    rows = [
-                        {"Order": i+1, "Title": s.title, "Artist": s.artist, "Key": s.key, "Tempo": s.tempo}
-                        for i, s in enumerate(arranged)
-                    ]
-                    st.dataframe(pd.DataFrame(rows))
-                    st.success(f"Arranged {len(arranged)} songs by {sort_mode}.")
+                        neighbors = hs.camelot_neighbors(a_key)
+                        for nb in neighbors:
+                            if is_harmonically_compatible(nb, b_key):
+                                candidate_keys.append(nb)
+                    bridge_suggestions.append({
+                        "From → To": f"{a.title} → {b.title}",
+                        "Tempo Gap (BPM)": tempo_gap,
+                        "Suggested Bridge Key(s)": ", ".join(candidate_keys) or "None",
+                        "Ideal Bridge Tempo (BPM)": round((a_t + b_t) / 2)
+                    })
+            if bridge_suggestions:
+                st.subheader("🔀 Suggested Bridge Key + Tempo Combinations")
+                st.dataframe(pd.DataFrame(bridge_suggestions))
 
-        # Cache the sequence in session state for OAuth redirects (serialize arranged order)
-        st.session_state.cached_sequence = _serialize_songs(sequence)
+        # Final arranged fallback
+        if arranged is None:
+            arranged = base_sequence
+
+        # compute mixing pairs & gaps
+        mixing_pairs = hs.find_mixing_pairs(arranged)
+        gaps_and_bridges = []
+        existing_keys = [s.key for s in songs]
+        for i in range(len(arranged) - 1):
+            a = arranged[i]
+            b = arranged[i + 1]
+            score = hs._distance_score(a.key, b.key)
+            if score < 0.6:
+                suggestions = hs.suggest_bridge_keys(a.key, b.key, available_keys=existing_keys)
+                gaps_and_bridges.append({'from': a, 'to': b, 'score': score, 'suggestions': suggestions})
+
+        # cache for convenience (no spotify auth)
+        try:
+            st.session_state['cached_songs'] = [s.__dict__ for s in songs]
+            st.session_state['cached_sequence'] = [s.__dict__ for s in arranged]
+        except Exception:
+            pass
 
         st.header("Recommended Play Order")
         rows = []
-        for i, s in enumerate(sequence):
+        for i, s in enumerate(arranged):
             camelot_display = hs.camelot_to_display(s.camelot) if s.camelot else s.key
-            rows.append({
-                'Order': i + 1,
-                'Title': s.title,
-                'Artist': s.artist,
-                'Camelot': camelot_display,
-                'Tempo': s.tempo
-            })
+            rows.append({'Order': i + 1, 'Title': s.title, 'Artist': s.artist, 'Camelot': camelot_display, 'Tempo': s.tempo})
         df_out = pd.DataFrame(rows)
         st.dataframe(df_out)
         st.download_button("Download recommended order (CSV)", df_out.to_csv(index=False).encode('utf-8'), file_name="recommended_order.csv", mime="text/csv")
@@ -1630,15 +1100,26 @@ with right_col:
             mp_rows.append({'From': f"{a.title} — {a.artist} {a_disp}", 'To': f"{b.title} — {b.artist} {b_disp}", 'Score': round(sc, 2)})
         st.table(pd.DataFrame(mp_rows))
 
-        if bridge_suggestions:
-                            st.subheader("🔀 Suggested Bridge Key + Tempo Combinations")
-                            st.dataframe(pd.DataFrame(bridge_suggestions))
+        if gaps_and_bridges:
+            st.header("Harmonic Gaps & Bridge Suggestions")
+            for gb in gaps_and_bridges:
+                a = gb['from']; b = gb['to']
+                a_disp = hs.camelot_to_display(a.camelot) if a.camelot else a.key
+                b_disp = hs.camelot_to_display(b.camelot) if b.camelot else b.key
+                st.subheader(f"{a.title} — {a_disp} → {b.title} — {b_disp}  (score {gb['score']:.2f})")
+                st.write("Bridge suggestions:")
+                if gb['suggestions']:
+                    for s in gb['suggestions']:
+                        st.write(f"- {s}")
+                else:
+                    st.write("- (no suggestions found)")
+                st.write("---")
         else:
-            st.success("No major harmonic gaps detected in the sequence!")
+            st.success("No major harmonic gaps detected — your order flows well!")
 
         if st.checkbox("Show normalized key mapping (debug)", value=False):
             mapping = []
-            for s in sequence:
+            for s in arranged:
                 mapping.append({'Title': s.title, 'Artist': s.artist, 'Input Key': s.key, 'Detected Camelot': s.camelot or '', 'Camelot Display': hs.camelot_to_display(s.camelot) if s.camelot else ''})
             st.dataframe(pd.DataFrame(mapping))
 
@@ -1646,8 +1127,4 @@ with right_col:
         st.info("No songs loaded yet. Upload/paste songs or fetch a SongData playlist using the left panel.")
 
 st.markdown("---")
-st.markdown(
-    "1.0.0\n"
-    "Thanks to songdata.io for playlist data.\n"
-    "Thanks to Mixed In Key for the Camelot system."
-)
+st.markdown("v1.0.0 — SongData scraping + Camelot sequencing. No Spotify authentication in this build.")
